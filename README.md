@@ -1,38 +1,25 @@
-# Neon Drift
+# Mob-apps
 
-A lightweight native Android arcade game built with **Kotlin + Jetpack Compose Canvas**.
+Native Android experiments built with Kotlin, Jetpack Compose, on-device AI and GitHub Actions.
 
-## Game
+## Reality3D
 
-- Drag anywhere to steer the neon ship.
-- Avoid the red gates.
-- Collect green energy orbs for bonus points.
-- The game accelerates and obstacle spacing tightens over time.
-- Best score is stored locally on the phone.
-- Pause, resume and restart are built in.
+`reality3d/` is an on-device photo-to-3D prototype:
 
-No game engine and no WebView are used. The gameplay loop and collision rules are Kotlin code, and
-Compose Canvas renders the game directly.
+1. Capture a photo or choose one from Gallery.
+2. Use Android AICore / Gemini Nano to analyze the object locally.
+3. Download the MiDaS-small TFLite depth model on first use.
+4. Generate a dense monocular depth map on-device.
+5. Convert that depth field into a textured triangular 3D mesh.
+6. Orbit the mesh in an OpenGL ES 3 viewer.
+7. Export OBJ + MTL + JPG texture for Blender/Unreal or other 3D tools.
 
-## Build
+This first release is intentionally a 2.5D depth mesh. A single photo cannot reveal hidden surfaces. Planned upgrades are full single-image reconstruction and ARCore multi-view/depth fusion.
 
-```bash
-gradle assembleRelease testDebugUnitTest lintDebug
-```
+## Neon Drift
 
-The APK is produced under `app/build/outputs/apk/release/`.
+`app/` contains the Neon Drift Android game.
 
-## GitHub Actions
+## CI
 
-Every push and pull request runs build + unit tests + Android lint on GitHub-hosted Ubuntu. Pushes to `main` also replace a
-rolling `latest-build` GitHub Release containing `NeonDrift.apk`, so the newest build can be installed
-straight onto an Android phone.
-
-## Project structure
-
-```text
-app/src/main/java/com/ma7moud/neondrift/
-  game/      Pure game state, spawning, difficulty and collision rules
-  ui/        Compose Canvas renderer, HUD, menus and touch controls
-  ui/theme/  Neon Material theme
-```
+Every push/PR builds, tests and lints all Android modules. Main-branch builds publish both APKs to the `latest-build` GitHub Release.
