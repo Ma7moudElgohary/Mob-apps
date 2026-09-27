@@ -1,0 +1,63 @@
+name: Android game build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: neon-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build, test and lint
+        run: gradle --no-daemon --stacktrace assembleRelease testDebugUnitTest lintDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonDrift-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            app/build/reports
+            app/build/test-results
+          if-no-files-found: ignore
+
+      - name: Publish latest Android build
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk NeonDrift.apk
+          gh release delete latest-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create latest-build NeonDrift.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --latest \
+            --title "Neon Drift build #${GITHUB_RUN_NUMBER}" \
+            --notes "Install NeonDrift.apk on Android. Built automatically from ${GITHUB_SHA::7}."
