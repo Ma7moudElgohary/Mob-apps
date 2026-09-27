@@ -25,7 +25,8 @@ class AiCoreAnalyzer {
             temperature = 0.2f
             maxOutputTokens = 320
         }
-        return model.generateContent(request).text.orEmpty().ifBlank { "AICore returned no text." }
+        return model.generateContent(request).candidates.firstOrNull()?.text.orEmpty()
+            .ifBlank { "AICore returned no text." }
     }
 
     fun close() = model.close()
