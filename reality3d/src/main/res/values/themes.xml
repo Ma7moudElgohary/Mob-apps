@@ -1,0 +1,1 @@
+<resources><style name="Theme.Reality3D" parent="android:style/Theme.Material.NoActionBar"><item name="android:fontFamily">sans</item><item name="android:statusBarColor">#05070B</item><item name="android:navigationBarColor">#05070B</item><item name="android:colorAccent">#50E3FF</item></style></resources>
