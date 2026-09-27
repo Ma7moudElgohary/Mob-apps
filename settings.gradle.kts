@@ -20,5 +20,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "NeonDrift"
+rootProject.name = "MobApps"
 include(":app")
+include(":reality3d")
