@@ -1,4 +1,4 @@
-name: Android apps build
+name: Reality3D build
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: mob-apps-${{ github.ref }}
+  group: reality3d-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,14 +29,8 @@ jobs:
         with:
           gradle-version: '8.14.3'
 
-      - name: Build, test and lint all apps
-        run: gradle --no-daemon --stacktrace assembleRelease testDebugUnitTest lintDebug
-
-      - name: Upload Neon Drift APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: NeonDrift-apk
-          path: app/build/outputs/apk/release/*.apk
+      - name: Build, test and lint Reality3D
+        run: gradle --no-daemon --stacktrace :reality3d:assembleRelease :reality3d:testDebugUnitTest :reality3d:lintDebug
 
       - name: Upload Reality3D APK
         uses: actions/upload-artifact@v4
@@ -44,29 +38,26 @@ jobs:
           name: Reality3D-apk
           path: reality3d/build/outputs/apk/release/*.apk
 
-      - name: Upload reports
+      - name: Upload Reality3D reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reports
+          name: Reality3D-reports
           path: |
-            app/build/reports
-            app/build/test-results
             reality3d/build/reports
             reality3d/build/test-results
           if-no-files-found: ignore
 
-      - name: Publish latest Android builds
+      - name: Publish latest Reality3D build
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/release/app-release.apk NeonDrift.apk
           cp reality3d/build/outputs/apk/release/reality3d-release.apk Reality3D.apk
           gh release delete latest-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh release create latest-build NeonDrift.apk Reality3D.apk \
+          gh release create latest-build Reality3D.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --latest \
-            --title "Mob Apps build #${GITHUB_RUN_NUMBER}" \
-            --notes "Android builds from ${GITHUB_SHA::7}: NeonDrift.apk and Reality3D.apk. Reality3D uses AICore for local object analysis and MiDaS for on-device monocular depth mesh generation."
+            --title "Reality3D build #${GITHUB_RUN_NUMBER}" \
+            --notes "Reality3D Android build from ${GITHUB_SHA::7}."
