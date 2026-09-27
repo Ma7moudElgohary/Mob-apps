@@ -19,6 +19,7 @@ import javax.microedition.khronos.egl.EGL10
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.egl.EGLDisplay
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.PI
 import kotlin.math.atan
 import kotlin.math.max
 import kotlin.math.sin
@@ -126,8 +127,9 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     private var yaw = DEFAULT_YAW
     private var pitch = DEFAULT_PITCH
     private var zoom = 1f
-    private var spinUntil = 0L
-    private var lastFrame = 0L
+    private var spinStart = 0L
+    private var spinBaseYaw = 0f
+    private var spinning = false
 
     // GL thread only.
     private var mesh: Mesh3D? = null
@@ -163,16 +165,18 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         zoom = 1f
     }
 
+    /** Swings the model left and right once, ending where it started, to show it is 3D. */
     fun startSpin() = synchronized(lock) {
-        spinUntil = SystemClock.uptimeMillis() + SPIN_MS
-        lastFrame = 0L
+        spinStart = SystemClock.uptimeMillis()
+        spinBaseYaw = yaw
+        spinning = true
     }
 
-    /** Stops the automatic turn; true when one was running. */
+    /** Stops the swing where it is; true when one was running. */
     fun stopSpin(): Boolean = synchronized(lock) {
-        val spinning = spinUntil > 0
-        spinUntil = 0
-        spinning
+        val wasSpinning = spinning
+        spinning = false
+        wasSpinning
     }
 
     /** Called on the GL thread. */
@@ -211,13 +215,14 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         val zoom: Float
         var spinFinished = false
         synchronized(lock) {
-            if (spinUntil > 0) {
-                val now = SystemClock.uptimeMillis()
-                if (lastFrame > 0) this.yaw += (now - lastFrame) * SPIN_DEGREES_PER_MS
-                lastFrame = now
-                if (now >= spinUntil) {
-                    spinUntil = 0
+            if (spinning) {
+                val progress = (SystemClock.uptimeMillis() - spinStart).toFloat() / SPIN_MS
+                if (progress >= 1f) {
+                    this.yaw = spinBaseYaw
+                    spinning = false
                     spinFinished = true
+                } else {
+                    this.yaw = spinBaseYaw + SWING_DEGREES * sin(2 * PI * progress).toFloat()
                 }
             }
             yaw = this.yaw
@@ -230,7 +235,9 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         val halfFovY = Math.toRadians(FOV_Y / 2.0)
         val halfFovX = atan(tan(halfFovY) * aspect)
         val distance = (radius / sin(minOf(halfFovX, halfFovY)) * 1.05 * zoom).toFloat()
-        Matrix.perspectiveM(projection, 0, FOV_Y.toFloat(), aspect, max(0.01f, distance - radius * 2f), distance + radius * 2f)
+        // The model lies within `radius` of the origin; a tight near plane keeps depth precision high.
+        val near = max(distance * 0.05f, distance - radius * 1.2f)
+        Matrix.perspectiveM(projection, 0, FOV_Y.toFloat(), aspect, near, distance + radius * 1.2f)
         Matrix.setLookAtM(view, 0, 0f, 0f, distance, 0f, 0f, 0f, 0f, 1f, 0f)
         Matrix.setIdentityM(model, 0)
         Matrix.rotateM(model, 0, pitch, 1f, 0f, 0f)
@@ -337,8 +344,8 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         const val DEFAULT_PITCH = 12f
         const val MIN_ZOOM = 0.35f
         const val MAX_ZOOM = 3f
-        const val SPIN_MS = 3_000L
-        const val SPIN_DEGREES_PER_MS = 50f / 1_000f
+        const val SPIN_MS = 3_500f
+        const val SWING_DEGREES = 40f
 
         const val VERTEX_SHADER = """#version 300 es
 layout(location = 0) in vec3 aPosition;
@@ -381,19 +388,20 @@ void main() {
     }
 }
 
-/** RGB888 with a depth buffer and 4× multisampling when the GPU offers it. */
+/** RGB888 with a 24-bit (else 16-bit) depth buffer and 4× multisampling when the GPU offers it. */
 private class MultisampleConfigChooser : GLSurfaceView.EGLConfigChooser {
 
     override fun chooseConfig(egl: EGL10, display: EGLDisplay): EGLConfig =
-        choose(egl, display, samples = 4) ?: choose(egl, display, samples = 0)
+        choose(egl, display, samples = 4, depth = 24) ?: choose(egl, display, samples = 4, depth = 16)
+            ?: choose(egl, display, samples = 0, depth = 24) ?: choose(egl, display, samples = 0, depth = 16)
             ?: throw IllegalStateException("No OpenGL ES 3 configuration available")
 
-    private fun choose(egl: EGL10, display: EGLDisplay, samples: Int): EGLConfig? {
+    private fun choose(egl: EGL10, display: EGLDisplay, samples: Int, depth: Int): EGLConfig? {
         val attributes = mutableListOf(
             EGL10.EGL_RED_SIZE, 8,
             EGL10.EGL_GREEN_SIZE, 8,
             EGL10.EGL_BLUE_SIZE, 8,
-            EGL10.EGL_DEPTH_SIZE, 16,
+            EGL10.EGL_DEPTH_SIZE, depth,
             EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         )
         if (samples > 0) attributes += listOf(EGL10.EGL_SAMPLE_BUFFERS, 1, EGL10.EGL_SAMPLES, samples)
