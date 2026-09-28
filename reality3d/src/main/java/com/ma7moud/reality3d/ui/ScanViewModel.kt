@@ -10,6 +10,7 @@ import com.ma7moud.reality3d.Reality3DApplication
 import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
+import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanSupport
@@ -148,12 +149,12 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() = release()
 
-    suspend fun export(format: ExportFormat): ExportFile? {
+    suspend fun export(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
         val result = _screen.value as? ScanScreenState.Result ?: return null
         _exporting.value = true
         return try {
             withContext(Dispatchers.Default) {
-                Exporter.encode(format, result.capture.mesh, null, baseName, result.capture.keyframes)
+                Exporter.encode(format, result.capture.mesh, null, baseName, result.capture.keyframes, budget)
             }
         } finally {
             _exporting.value = false

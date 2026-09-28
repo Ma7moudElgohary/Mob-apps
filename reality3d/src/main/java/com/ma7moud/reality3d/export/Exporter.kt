@@ -5,9 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import androidx.core.content.FileProvider
+import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.GlbWriter
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.ObjWriter
+import com.ma7moud.reality3d.mesh.PlyWriter
 import com.ma7moud.reality3d.mesh.StlWriter
 import com.ma7moud.reality3d.scan.Keyframe
 import com.ma7moud.reality3d.scan.PhotoSetWriter
@@ -20,6 +22,8 @@ enum class ExportFormat(val label: String, val extension: String, val mimeType: 
     GLB("GLB", "glb", "model/gltf-binary", "One file with the colours. Opens in Windows 3D Viewer, Blender and online glTF viewers."),
     STL("STL", "stl", "model/stl", "For 3D printing: the shape only, in millimetres."),
     OBJ("OBJ", "zip", "application/zip", "OBJ with its colours in one zip, for Blender, SketchUp or Unreal."),
+    PLY("PLY", "ply", "application/octet-stream", "Every point with its colour and normal, plus the triangles, for CloudCompare, MeshLab and other point-cloud tools."),
+    UNREAL("Unreal", "zip", "application/zip", "Game-ready: three levels of detail, a collision hull and import notes for Unreal Engine."),
     PHOTOS("Photos", "zip", "application/zip", "The scan photos with the camera positions (in meters), for photogrammetry software on a computer."),
 }
 
@@ -29,16 +33,41 @@ object Exporter {
 
     private const val MAX_AGE_MS = 24 * 60 * 60 * 1000L
 
-    /** [photo] textures single-photo models; [keyframes] are a scan's photos for [ExportFormat.PHOTOS]. */
-    fun encode(format: ExportFormat, mesh: Mesh3D, photo: Bitmap?, baseName: String, keyframes: List<Keyframe> = emptyList()): ExportFile {
+    /**
+     * [photo] textures single-photo models; [keyframes] are a scan's photos for [ExportFormat.PHOTOS];
+     * [budget] sets the triangles of the [ExportFormat.UNREAL] levels of detail.
+     */
+    fun encode(
+        format: ExportFormat,
+        mesh: Mesh3D,
+        photo: Bitmap?,
+        baseName: String,
+        keyframes: List<Keyframe> = emptyList(),
+        budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM,
+    ): ExportFile {
         val bytes = when (format) {
             ExportFormat.GLB -> GlbWriter.write(mesh, photo?.let(::jpeg), name = baseName)
             ExportFormat.STL -> StlWriter.write(mesh)
             ExportFormat.OBJ -> ObjWriter.writeZip(mesh, photo?.let(::jpeg), baseName)
+            ExportFormat.PLY -> PlyWriter.write(mesh, photo?.let(::pixels))
+            ExportFormat.UNREAL -> GameReadyPack.write(mesh, photo?.let { GlbWriter.Texture(jpeg(it), "image/jpeg") }, assetName(baseName), budget)
             ExportFormat.PHOTOS -> PhotoSetWriter.write(keyframes)
         }
-        val name = if (format == ExportFormat.PHOTOS) "${baseName}_photos" else baseName
+        val name = when (format) {
+            ExportFormat.PHOTOS -> "${baseName}_photos"
+            ExportFormat.UNREAL -> "${baseName}_unreal"
+            else -> baseName
+        }
         return ExportFile(format, "$name.${format.extension}", bytes)
+    }
+
+    /** Unreal asset names allow letters, digits and underscores only. */
+    internal fun assetName(name: String): String = name.replace(Regex("[^A-Za-z0-9_]"), "_").ifEmpty { "Reality3D" }
+
+    private fun pixels(photo: Bitmap): PlyWriter.Photo {
+        val argb = IntArray(photo.width * photo.height)
+        photo.getPixels(argb, 0, photo.width, 0, 0, photo.width, photo.height)
+        return PlyWriter.Photo(photo.width, photo.height, argb)
     }
 
     private fun jpeg(photo: Bitmap): ByteArray =

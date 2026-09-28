@@ -3,8 +3,15 @@ package com.ma7moud.reality3d.mesh
 /** Cross-section of the inflated subject. */
 enum class ShapeProfile { ROUND, BOXY }
 
-/** Grid resolution laid over the photo (cells along its longer side). */
-enum class MeshDetail(val gridCells: Int) { STANDARD(144), HIGH(224) }
+/**
+ * How finely the model follows the photo. Both levels start from the same fine grid; standard then
+ * simplifies it to about the triangle count of a [budgetCells]-cell grid, keeping triangles where the
+ * shape needs them rather than spreading them evenly.
+ */
+enum class MeshDetail(val gridCells: Int, val budgetCells: Int?) {
+    STANDARD(224, 144),
+    HIGH(224, null),
+}
 
 data class MeshSettings(
     /** Adds a back surface joined to the front along the silhouette, giving a closed, printable model. */

@@ -16,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -39,6 +40,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -84,6 +86,7 @@ import com.ma7moud.reality3d.ai.AiState
 import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
+import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshDetail
 import com.ma7moud.reality3d.mesh.MeshSettings
@@ -174,6 +177,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
     val saveGlb = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.GLB.mimeType), viewModel::savePending)
     val saveStl = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.STL.mimeType), viewModel::savePending)
     val saveObj = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.OBJ.mimeType), viewModel::savePending)
+    val savePly = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.PLY.mimeType), viewModel::savePending)
 
     // The app holds the camera permission for scanning, so Android makes the camera app wait for it too.
     fun takePhoto() {
@@ -192,10 +196,10 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
         }
     }
 
-    fun share(format: ExportFormat) {
+    fun share(format: ExportFormat, budget: GameReadyPack.Budget) {
         scope.launch {
             try {
-                val file = viewModel.export(format) ?: return@launch
+                val file = viewModel.export(format, budget) ?: return@launch
                 context.startActivity(Exporter.shareIntent(context, file))
             } catch (e: CancellationException) {
                 throw e
@@ -205,15 +209,16 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
         }
     }
 
-    fun save(format: ExportFormat) {
+    fun save(format: ExportFormat, budget: GameReadyPack.Budget) {
         scope.launch {
             try {
-                val file = viewModel.export(format) ?: return@launch
+                val file = viewModel.export(format, budget) ?: return@launch
                 viewModel.holdForSaving(file)
                 when (format) {
                     ExportFormat.GLB -> saveGlb.launch(file.fileName)
                     ExportFormat.STL -> saveStl.launch(file.fileName)
-                    ExportFormat.OBJ, ExportFormat.PHOTOS -> saveObj.launch(file.fileName)
+                    ExportFormat.OBJ, ExportFormat.UNREAL, ExportFormat.PHOTOS -> saveObj.launch(file.fileName)
+                    ExportFormat.PLY -> savePly.launch(file.fileName)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -273,7 +278,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
             AiCard(ai, state.insight, state.analyzing, onAnalyze = viewModel::analyze, onDownload = viewModel::downloadAi, onRetry = viewModel::retryAi)
         }
         if (mesh != null) {
-            ExportCard(SINGLE_PHOTO_FORMATS, mesh.solid, state.exporting, onShare = { share(it) }, onSave = { save(it) })
+            ExportCard(SINGLE_PHOTO_FORMATS, mesh.solid, state.exporting, onShare = { format, budget -> share(format, budget) }, onSave = { format, budget -> save(format, budget) })
         }
         AboutCard()
         Spacer(Modifier.height(8.dp))
@@ -657,24 +662,33 @@ internal fun ExportCard(
     formats: List<ExportFormat>,
     solid: Boolean,
     exporting: Boolean,
-    onShare: (ExportFormat) -> Unit,
-    onSave: (ExportFormat) -> Unit,
+    onShare: (ExportFormat, GameReadyPack.Budget) -> Unit,
+    onSave: (ExportFormat, GameReadyPack.Budget) -> Unit,
 ) {
     var format by rememberSaveable { mutableStateOf(formats.first()) }
+    var budget by rememberSaveable { mutableStateOf(GameReadyPack.Budget.MEDIUM) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Export", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 if (exporting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             }
-            Choice(formats.map { it.label }, formats.indexOf(format)) { format = formats[it] }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                formats.forEach { option ->
+                    FilterChip(selected = option == format, onClick = { format = option }, label = { Text(option.label) })
+                }
+            }
             Text(format.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (format == ExportFormat.UNREAL) {
+                Text("Triangles in the most detailed level", style = MaterialTheme.typography.bodySmall)
+                Choice(GameReadyPack.Budget.entries.map { it.label }, budget.ordinal) { budget = GameReadyPack.Budget.entries[it] }
+            }
             if (format == ExportFormat.STL && !solid) {
                 Text("Switch Shape to Solid for a closed model a printer can use.", style = MaterialTheme.typography.bodySmall, color = Waiting)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = { onShare(format) }, enabled = !exporting, modifier = Modifier.weight(1f)) { Text("Share") }
-                OutlinedButton(onClick = { onSave(format) }, enabled = !exporting, modifier = Modifier.weight(1f)) { Text("Save to phone") }
+                Button(onClick = { onShare(format, budget) }, enabled = !exporting, modifier = Modifier.weight(1f)) { Text("Share") }
+                OutlinedButton(onClick = { onSave(format, budget) }, enabled = !exporting, modifier = Modifier.weight(1f)) { Text("Save to phone") }
             }
         }
     }
@@ -700,7 +714,7 @@ private fun AboutCard() {
 }
 
 /** The single-photo model has no scan photos to export. */
-private val SINGLE_PHOTO_FORMATS = listOf(ExportFormat.GLB, ExportFormat.STL, ExportFormat.OBJ)
+private val SINGLE_PHOTO_FORMATS = listOf(ExportFormat.GLB, ExportFormat.STL, ExportFormat.OBJ, ExportFormat.PLY, ExportFormat.UNREAL)
 
 private fun createCameraUri(context: Context): Uri {
     val directory = File(context.cacheDir, "camera").apply { mkdirs() }

@@ -66,6 +66,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
+import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
@@ -322,11 +323,12 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
     val saveGlb = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.GLB.mimeType), viewModel::savePending)
     val saveStl = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.STL.mimeType), viewModel::savePending)
     val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.OBJ.mimeType), viewModel::savePending)
+    val savePly = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.PLY.mimeType), viewModel::savePending)
 
-    fun share(format: ExportFormat) {
+    fun share(format: ExportFormat, budget: GameReadyPack.Budget) {
         scope.launch {
             try {
-                val file = viewModel.export(format) ?: return@launch
+                val file = viewModel.export(format, budget) ?: return@launch
                 context.startActivity(Exporter.shareIntent(context, file))
             } catch (e: CancellationException) {
                 throw e
@@ -336,15 +338,16 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
         }
     }
 
-    fun save(format: ExportFormat) {
+    fun save(format: ExportFormat, budget: GameReadyPack.Budget) {
         scope.launch {
             try {
-                val file = viewModel.export(format) ?: return@launch
+                val file = viewModel.export(format, budget) ?: return@launch
                 viewModel.holdForSaving(file)
                 when (format) {
                     ExportFormat.GLB -> saveGlb.launch(file.fileName)
                     ExportFormat.STL -> saveStl.launch(file.fileName)
-                    ExportFormat.OBJ, ExportFormat.PHOTOS -> saveZip.launch(file.fileName)
+                    ExportFormat.OBJ, ExportFormat.UNREAL, ExportFormat.PHOTOS -> saveZip.launch(file.fileName)
+                    ExportFormat.PLY -> savePly.launch(file.fileName)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -388,8 +391,8 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
             formats = ExportFormat.entries,
             solid = true,
             exporting = exporting,
-            onShare = { share(it) },
-            onSave = { save(it) },
+            onShare = { format, budget -> share(format, budget) },
+            onSave = { format, budget -> save(format, budget) },
         )
         OutlinedButton(onClick = onScanAgain, modifier = Modifier.fillMaxWidth()) { Text("Scan something else") }
         Spacer(Modifier.height(8.dp))

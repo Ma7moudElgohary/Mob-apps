@@ -186,7 +186,11 @@ object MeshBuilder {
             }
         }
         val finalIndices = if (count == indices.size) indices else indices.copyOf(count)
-        return Mesh3D(positions, vertexNormals(positions, finalIndices), uvs, finalIndices, settings.solid, isolated)
+        val mesh = Mesh3D(positions, vertexNormals(positions, finalIndices), uvs, finalIndices, settings.solid, isolated)
+        val budget = settings.detail.budgetCells ?: return mesh
+        // Same triangle count as a coarser grid would give, but spent where the surface bends.
+        val ratio = budget.toFloat() / settings.detail.gridCells
+        return MeshSimplifier.simplify(mesh, (mesh.triangleCount * ratio * ratio).roundToInt())
     }
 
     private fun edgeKey(a: Int, b: Int): Long = (min(a, b).toLong() shl 32) or max(a, b).toLong()

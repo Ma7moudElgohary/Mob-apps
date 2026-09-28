@@ -15,6 +15,7 @@ import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
+import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshBuilder
 import com.ma7moud.reality3d.mesh.MeshSettings
@@ -214,13 +215,13 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     fun retryAi() = services.ai.refresh()
 
     /** Encodes the current model; null when there is none. */
-    suspend fun export(format: ExportFormat): ExportFile? {
+    suspend fun export(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
         val snapshot = _state.value
         val mesh = snapshot.mesh ?: return null
         val photo = snapshot.photo ?: return null
         _state.update { it.copy(exporting = true) }
         return try {
-            withContext(Dispatchers.Default) { Exporter.encode(format, mesh, photo, baseName(snapshot.insight)) }
+            withContext(Dispatchers.Default) { Exporter.encode(format, mesh, photo, baseName(snapshot.insight), budget = budget) }
         } finally {
             _state.update { it.copy(exporting = false) }
         }

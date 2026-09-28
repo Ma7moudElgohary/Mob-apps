@@ -23,14 +23,23 @@ object GlbWriter {
     private const val ELEMENT_ARRAY_BUFFER = 34963
 
     /**
+     * The base colour image, already encoded. With [alphaMask] its alpha channel cuts the surface out
+     * (glTF alpha mode MASK at 0.5), for photos whose background is transparent.
+     */
+    class Texture(val bytes: ByteArray, val mimeType: String, val alphaMask: Boolean = false)
+
+    /**
      * @param jpeg the photo as JPEG, used as the base colour texture when the mesh has UVs.
      * @param longestSideMeters size given to a normalised model's longest side (glTF units are meters);
      *   real-scale scans keep their measured size.
      */
-    fun write(mesh: Mesh3D, jpeg: ByteArray?, longestSideMeters: Float = 0.2f, name: String = "Reality3D"): ByteArray {
+    fun write(mesh: Mesh3D, jpeg: ByteArray?, longestSideMeters: Float = 0.2f, name: String = "Reality3D"): ByteArray =
+        write(mesh, jpeg?.let { Texture(it, "image/jpeg") }, longestSideMeters, name)
+
+    fun write(mesh: Mesh3D, texture: Texture?, longestSideMeters: Float = 0.2f, name: String = "Reality3D"): ByteArray {
         val scale = if (mesh.realScale) 1f else longestSideMeters / max(mesh.longestSide, 1e-6f)
         val uvs = mesh.uvs
-        val textured = jpeg != null && uvs != null
+        val textured = texture != null && uvs != null
         val colors = mesh.colors
         val vertices = mesh.vertexCount
 
@@ -47,7 +56,7 @@ object GlbWriter {
         val uvView = if (textured) addView(vertices * 8, ARRAY_BUFFER) else -1
         val colorView = if (colors != null) addView(vertices * 12, ARRAY_BUFFER) else -1
         val indexView = addView(mesh.indices.size * 4, ELEMENT_ARRAY_BUFFER)
-        val imageView = if (textured) addView(jpeg.size, null) else -1
+        val imageView = if (textured) addView(texture.bytes.size, null) else -1
         val binLength = cursor
 
         val bin = ByteBuffer.allocate(binLength).order(ByteOrder.LITTLE_ENDIAN)
@@ -76,7 +85,7 @@ object GlbWriter {
         for (index in mesh.indices) bin.putInt(index)
         if (textured) {
             bin.seek(views[imageView].offset)
-            bin.put(jpeg)
+            bin.put(texture.bytes)
         }
 
         val json = buildString {
@@ -93,11 +102,12 @@ object GlbWriter {
             append("\"materials\":[{\"name\":").append(if (textured) "\"Photo\"" else "\"Scan\"").append(",\"pbrMetallicRoughness\":{")
             if (textured) append("\"baseColorTexture\":{\"index\":0},")
             append("\"metallicFactor\":0.0,\"roughnessFactor\":0.9},")
+            if (textured && texture.alphaMask) append("\"alphaMode\":\"MASK\",\"alphaCutoff\":0.5,")
             append("\"doubleSided\":").append(!mesh.solid).append("}],")
             if (textured) {
                 append("\"textures\":[{\"sampler\":0,\"source\":0}],")
                 append("\"samplers\":[{\"magFilter\":9729,\"minFilter\":9987,\"wrapS\":33071,\"wrapT\":33071}],")
-                append("\"images\":[{\"bufferView\":").append(imageView).append(",\"mimeType\":\"image/jpeg\"}],")
+                append("\"images\":[{\"bufferView\":").append(imageView).append(",\"mimeType\":").append(quote(texture.mimeType)).append("}],")
             }
             append("\"accessors\":[")
             append("{\"bufferView\":").append(positionView).append(",\"componentType\":$FLOAT,\"count\":$vertices,\"type\":\"VEC3\",")
