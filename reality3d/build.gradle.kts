@@ -17,7 +17,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.2.$buildNumber"
+        versionName = "0.5.$buildNumber"
     }
 
     signingConfigs {
@@ -57,8 +57,12 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+
     implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
     implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
-    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+    implementation("com.google.ai.edge.litert:litert:2.2.0")
+    implementation("com.google.ar:core:1.51.0")
+
+    testImplementation(libs.junit)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
