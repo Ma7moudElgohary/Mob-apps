@@ -2,8 +2,10 @@
 
 package com.ma7moud.reality3d.ui
 
+import android.Manifest
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -71,11 +73,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ma7moud.reality3d.ai.AiState
 import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.export.ExportFormat
@@ -122,13 +126,18 @@ private val Muted = Color(0xFF6B7A94)
 fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
     MaterialTheme(colorScheme = RealityColors) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Reality3DScreen(viewModel, useGlViewer)
+            var scanning by rememberSaveable { mutableStateOf(false) }
+            if (scanning) {
+                ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { scanning = false })
+            } else {
+                Reality3DScreen(viewModel, useGlViewer, onScan = { scanning = true })
+            }
         }
     }
 }
 
 @Composable
-private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
+private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean, onScan: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val ai by viewModel.aiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -144,17 +153,34 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean)
         val uri = cameraUri
         if (saved && uri != null) viewModel.loadPhoto(uri)
     }
-    val saveGlb = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.GLB.mimeType), viewModel::savePending)
-    val saveStl = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.STL.mimeType), viewModel::savePending)
-    val saveObj = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.OBJ.mimeType), viewModel::savePending)
 
-    fun takePhoto() {
+    fun launchCamera() {
         val uri = createCameraUri(context)
         cameraUri = uri
         try {
             camera.launch(uri)
         } catch (e: ActivityNotFoundException) {
             viewModel.showMessage("No camera app was found on this phone.", isError = true)
+        }
+    }
+
+    val cameraPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            launchCamera()
+        } else {
+            viewModel.showMessage("Taking a photo needs the camera. You can pick one from the gallery instead.", isError = true)
+        }
+    }
+    val saveGlb = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.GLB.mimeType), viewModel::savePending)
+    val saveStl = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.STL.mimeType), viewModel::savePending)
+    val saveObj = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.OBJ.mimeType), viewModel::savePending)
+
+    // The app holds the camera permission for scanning, so Android makes the camera app wait for it too.
+    fun takePhoto() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchCamera()
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -187,7 +213,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean)
                 when (format) {
                     ExportFormat.GLB -> saveGlb.launch(file.fileName)
                     ExportFormat.STL -> saveStl.launch(file.fileName)
-                    ExportFormat.OBJ -> saveObj.launch(file.fileName)
+                    ExportFormat.OBJ, ExportFormat.PHOTOS -> saveObj.launch(file.fileName)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -209,6 +235,13 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean)
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Header()
+        ScanCard(onScan)
+        Text(
+            "Or from a single photo",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
         StatusCard(ai, state.depthModelReady, state.depthDownloadBytes, onGetAi = viewModel::downloadAi)
         PhotoCard(photo, enabled = !busy, onCamera = { takePhoto() }, onGallery = { pickPhoto() })
         if (photo != null && mesh == null) {
@@ -240,7 +273,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean)
             AiCard(ai, state.insight, state.analyzing, onAnalyze = viewModel::analyze, onDownload = viewModel::downloadAi, onRetry = viewModel::retryAi)
         }
         if (mesh != null) {
-            ExportCard(mesh.solid, state.exporting, onShare = { share(it) }, onSave = { save(it) })
+            ExportCard(SINGLE_PHOTO_FORMATS, mesh.solid, state.exporting, onShare = { share(it) }, onSave = { save(it) })
         }
         AboutCard()
         Spacer(Modifier.height(8.dp))
@@ -257,10 +290,50 @@ private fun Header() {
             color = MaterialTheme.colorScheme.primary,
         )
         Text(
-            "Turn one photo into a 3D model, right on your phone.",
+            "3D models made on your phone: scan an object from every side, or start from one photo.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun ScanCard(onScan: () -> Unit) {
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "360° scan",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "NEW",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                )
+            }
+            Text(
+                "Walk around the object with the camera. ARCore measures it as you go, and the phone builds a " +
+                    "closed, coloured model at its real size, in centimetres.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Button(onClick = onScan, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Text("Start 360° scan", style = MaterialTheme.typography.titleMedium)
+            }
+        }
     }
 }
 
@@ -357,9 +430,9 @@ private fun ProgressPanel(progress: Progress) {
 }
 
 @Composable
-private fun ViewerCard(
+internal fun ViewerCard(
     mesh: Mesh3D,
-    photo: Bitmap,
+    photo: Bitmap?,
     useGlViewer: Boolean,
     clay: Boolean,
     resetRequests: Int,
@@ -388,7 +461,7 @@ private fun ViewerCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row(Modifier.align(Alignment.BottomEnd).padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onToggleClay) { Text(if (clay) "Photo" else "Clay") }
+                FilledTonalButton(onClick = onToggleClay) { Text(if (!clay) "Clay" else if (photo != null) "Photo" else "Colours") }
                 FilledTonalButton(onClick = onReset) { Text("Reset") }
             }
         }
@@ -396,7 +469,7 @@ private fun ViewerCard(
 }
 
 @Composable
-private fun MeshViewer(mesh: Mesh3D, photo: Bitmap, clay: Boolean, resetRequests: Int, modifier: Modifier) {
+private fun MeshViewer(mesh: Mesh3D, photo: Bitmap?, clay: Boolean, resetRequests: Int, modifier: Modifier) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val view = remember { MeshSurfaceView(context) }
@@ -477,7 +550,7 @@ private fun LabeledSlider(
 }
 
 @Composable
-private fun Choice(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+internal fun Choice(options: List<String>, selected: Int, onSelect: (Int) -> Unit) {
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
         options.forEachIndexed { index, label ->
             SegmentedButton(
@@ -576,15 +649,21 @@ private fun InsightView(insight: ObjectInsight) {
 }
 
 @Composable
-private fun ExportCard(solid: Boolean, exporting: Boolean, onShare: (ExportFormat) -> Unit, onSave: (ExportFormat) -> Unit) {
-    var format by rememberSaveable { mutableStateOf(ExportFormat.GLB) }
+internal fun ExportCard(
+    formats: List<ExportFormat>,
+    solid: Boolean,
+    exporting: Boolean,
+    onShare: (ExportFormat) -> Unit,
+    onSave: (ExportFormat) -> Unit,
+) {
+    var format by rememberSaveable { mutableStateOf(formats.first()) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Export", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 if (exporting) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             }
-            Choice(ExportFormat.entries.map { it.label }, format.ordinal) { format = ExportFormat.entries[it] }
+            Choice(formats.map { it.label }, formats.indexOf(format)) { format = formats[it] }
             Text(format.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (format == ExportFormat.STL && !solid) {
                 Text("Switch Shape to Solid for a closed model a printer can use.", style = MaterialTheme.typography.bodySmall, color = Waiting)
@@ -605,14 +684,19 @@ private fun AboutCard() {
         shape = RoundedCornerShape(16.dp),
     ) {
         Text(
-            "How it works: ML Kit cuts the subject out, MiDaS estimates its depth, and the outline is inflated into a " +
-                "rounded shape. One photo cannot show the back, so Solid mode mirrors the front. Everything runs on the phone.",
+            "How it works: the 360° scan fuses ARCore's depth maps into one closed surface and colours it from the " +
+                "photos taken on the way round. From a single photo, ML Kit cuts the subject out, MiDaS estimates its " +
+                "depth and the outline is inflated into a rounded shape; one photo cannot show the back, so Solid mode " +
+                "mirrors the front. Everything runs on the phone.",
             Modifier.padding(14.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
+
+/** The single-photo model has no scan photos to export. */
+private val SINGLE_PHOTO_FORMATS = listOf(ExportFormat.GLB, ExportFormat.STL, ExportFormat.OBJ)
 
 private fun createCameraUri(context: Context): Uri {
     val directory = File(context.cacheDir, "camera").apply { mkdirs() }

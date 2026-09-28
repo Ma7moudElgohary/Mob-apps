@@ -17,7 +17,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.3.$buildNumber"
+        versionName = "0.4.$buildNumber"
 
         // Phones that run Gemini Nano are all 64-bit ARM; dropping the other ABIs of LiteRT saves about 11 MB.
         ndk {
@@ -73,6 +73,7 @@ dependencies {
     implementation(libs.mlkit.genai.prompt)
     implementation(libs.mlkit.subject.segmentation)
     implementation(libs.tensorflow.lite)
+    implementation(libs.arcore)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)

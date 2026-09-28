@@ -3,8 +3,11 @@ package com.ma7moud.reality3d.mesh
 import kotlin.math.max
 
 /**
- * A textured triangle mesh centred on the origin, +Y up and +Z towards the camera that took the photo.
- * The subject's longest side in the photo plane is 1 unit long.
+ * A triangle mesh with +Y up and +Z towards the front of the object.
+ *
+ * Models made from one photo are centred on the origin with the subject's longest side 1 unit long and
+ * are textured with the photo ([uvs]). Scans are in real-world meters ([realScale]) with their base at
+ * y = 0 and carry a colour per vertex ([colors]).
  */
 class Mesh3D(
     /** x, y, z per vertex. */
@@ -12,13 +15,17 @@ class Mesh3D(
     /** Unit normal per vertex. */
     val normals: FloatArray,
     /** Photo coordinates per vertex, glTF convention: (0, 0) is the photo's top-left corner. */
-    val uvs: FloatArray,
+    val uvs: FloatArray?,
     /** Counter-clockwise triangles (seen from outside). */
     val indices: IntArray,
     /** True when the mesh is closed (every edge shared by exactly two triangles). */
     val solid: Boolean,
     /** False when no subject could be separated and the whole photo was used. */
     val subjectIsolated: Boolean,
+    /** sRGB colour (0..1) per vertex, for scans. */
+    val colors: FloatArray? = null,
+    /** True when positions are real-world meters rather than a normalised size. */
+    val realScale: Boolean = false,
 ) {
     val vertexCount: Int get() = positions.size / 3
     val triangleCount: Int get() = indices.size / 3
@@ -40,4 +47,7 @@ class Mesh3D(
     }
 
     val longestSide: Float get() = bounds.let { max(it[3] - it[0], max(it[4] - it[1], it[5] - it[2])) }
+
+    /** Width (x), height (y) and depth (z) of the bounding box. */
+    val size: FloatArray get() = bounds.let { floatArrayOf(it[3] - it[0], it[4] - it[1], it[5] - it[2]) }
 }

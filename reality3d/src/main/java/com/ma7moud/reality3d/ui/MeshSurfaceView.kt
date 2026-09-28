@@ -68,14 +68,17 @@ class MeshSurfaceView(context: Context) : GLSurfaceView(context) {
         contentDescription = "3D model viewer. Drag to rotate, pinch to zoom, double-tap to reset."
     }
 
-    /** Shows a new mesh. A new photo also resets the view and gives the model a short turn. */
-    fun setScene(mesh: Mesh3D, photo: Bitmap) {
+    /**
+     * Shows a mesh, textured with [photo] or coloured per vertex. A new subject also resets the view and
+     * gives the model a short turn.
+     */
+    fun setScene(mesh: Mesh3D, photo: Bitmap?) {
         if (mesh === this.mesh && photo === this.photo) return
-        val newPhoto = photo !== this.photo
+        val newSubject = this.mesh == null || photo !== this.photo
         this.mesh = mesh
         this.photo = photo
         queueEvent { renderer.setScene(mesh, photo) }
-        if (newPhoto) {
+        if (newSubject) {
             renderer.resetView()
             renderer.startSpin()
             renderMode = RENDERMODE_CONTINUOUSLY
@@ -136,6 +139,8 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     private var photo: Bitmap? = null
     private var uploadedMesh: Mesh3D? = null
     private var uploadedPhoto: Bitmap? = null
+    private var hasColors = false
+    private val center = FloatArray(3)
     private var program = 0
     private val buffers = IntArray(2)
     private var texture = 0
@@ -145,7 +150,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     private var uMvp = -1
     private var uModelView = -1
     private var uTexture = -1
-    private var uClay = -1
+    private var uMode = -1
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
     private val model = FloatArray(16)
@@ -180,7 +185,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     }
 
     /** Called on the GL thread. */
-    fun setScene(mesh: Mesh3D, photo: Bitmap) {
+    fun setScene(mesh: Mesh3D, photo: Bitmap?) {
         this.mesh = mesh
         this.photo = photo
         if (program != 0) upload()
@@ -192,7 +197,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         uMvp = GLES30.glGetUniformLocation(program, "uMvp")
         uModelView = GLES30.glGetUniformLocation(program, "uModelView")
         uTexture = GLES30.glGetUniformLocation(program, "uTexture")
-        uClay = GLES30.glGetUniformLocation(program, "uClay")
+        uMode = GLES30.glGetUniformLocation(program, "uMode")
         buffers.fill(0)
         texture = 0
         uploadedMesh = null
@@ -242,13 +247,20 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         Matrix.setIdentityM(model, 0)
         Matrix.rotateM(model, 0, pitch, 1f, 0f, 0f)
         Matrix.rotateM(model, 0, yaw, 0f, 1f, 0f)
+        Matrix.translateM(model, 0, -center[0], -center[1], -center[2])
         Matrix.multiplyMM(modelView, 0, view, 0, model, 0)
         Matrix.multiplyMM(mvp, 0, projection, 0, modelView, 0)
 
         GLES30.glUseProgram(program)
         GLES30.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
         GLES30.glUniformMatrix4fv(uModelView, 1, false, modelView, 0)
-        GLES30.glUniform1f(uClay, if (clay || texture == 0) 1f else 0f)
+        val mode = when {
+            clay -> MODE_CLAY
+            uploadedPhoto != null && texture != 0 -> MODE_TEXTURE
+            hasColors -> MODE_COLORS
+            else -> MODE_CLAY
+        }
+        GLES30.glUniform1i(uMode, mode)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
         GLES30.glUniform1i(uTexture, 0)
@@ -260,6 +272,8 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         GLES30.glVertexAttribPointer(1, 3, GLES30.GL_FLOAT, false, STRIDE, 12)
         GLES30.glEnableVertexAttribArray(2)
         GLES30.glVertexAttribPointer(2, 2, GLES30.GL_FLOAT, false, STRIDE, 24)
+        GLES30.glEnableVertexAttribArray(3)
+        GLES30.glVertexAttribPointer(3, 3, GLES30.GL_FLOAT, false, STRIDE, 32)
         GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, buffers[1])
         GLES30.glDrawElements(GLES30.GL_TRIANGLES, indexCount, GLES30.GL_UNSIGNED_INT, 0)
         GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0)
@@ -268,10 +282,15 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
 
     private fun upload() {
         val mesh = mesh ?: return
-        val photo = photo ?: return
+        val photo = photo
         if (mesh !== uploadedMesh) {
             if (buffers[0] == 0) GLES30.glGenBuffers(2, buffers, 0)
             val vertices = ByteBuffer.allocateDirect(mesh.vertexCount * STRIDE).order(ByteOrder.nativeOrder()).asFloatBuffer()
+            // Orbit around the middle of the bounding box: scans stand on their base at y = 0.
+            val b = mesh.bounds
+            for (axis in 0 until 3) center[axis] = (b[axis] + b[axis + 3]) / 2
+            val uvs = mesh.uvs
+            val colors = mesh.colors
             var farthest = 0f
             for (i in 0 until mesh.vertexCount) {
                 val x = mesh.positions[i * 3]
@@ -279,9 +298,14 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
                 val z = mesh.positions[i * 3 + 2]
                 vertices.put(x).put(y).put(z)
                 vertices.put(mesh.normals[i * 3]).put(mesh.normals[i * 3 + 1]).put(mesh.normals[i * 3 + 2])
-                vertices.put(mesh.uvs[i * 2]).put(mesh.uvs[i * 2 + 1])
-                farthest = max(farthest, x * x + y * y + z * z)
+                if (uvs != null) vertices.put(uvs[i * 2]).put(uvs[i * 2 + 1]) else vertices.put(0f).put(0f)
+                if (colors != null) vertices.put(colors[i * 3]).put(colors[i * 3 + 1]).put(colors[i * 3 + 2]) else vertices.put(1f).put(1f).put(1f)
+                val dx = x - center[0]
+                val dy = y - center[1]
+                val dz = z - center[2]
+                farthest = max(farthest, dx * dx + dy * dy + dz * dz)
             }
+            hasColors = colors != null
             (vertices as Buffer).position(0)
             GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, buffers[0])
             GLES30.glBufferData(GLES30.GL_ARRAY_BUFFER, mesh.vertexCount * STRIDE, vertices, GLES30.GL_STATIC_DRAW)
@@ -296,7 +320,9 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
             radius = max(sqrt(farthest), 1e-3f)
             uploadedMesh = mesh
         }
-        if (photo !== uploadedPhoto && !photo.isRecycled) {
+        if (photo == null) {
+            uploadedPhoto = null
+        } else if (photo !== uploadedPhoto && !photo.isRecycled) {
             if (texture == 0) {
                 val ids = IntArray(1)
                 GLES30.glGenTextures(1, ids, 0)
@@ -338,7 +364,10 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     }
 
     private companion object {
-        const val STRIDE = 8 * 4
+        const val STRIDE = 11 * 4
+        const val MODE_TEXTURE = 0
+        const val MODE_COLORS = 1
+        const val MODE_CLAY = 2
         const val FOV_Y = 40.0
         const val DEFAULT_YAW = -25f
         const val DEFAULT_PITCH = 12f
@@ -351,15 +380,18 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUv;
+layout(location = 3) in vec3 aColor;
 uniform mat4 uMvp;
 uniform mat4 uModelView;
 out vec3 vNormal;
 out vec3 vViewPosition;
 out vec2 vUv;
+out vec3 vColor;
 void main() {
     vNormal = mat3(uModelView) * aNormal;
     vViewPosition = (uModelView * vec4(aPosition, 1.0)).xyz;
     vUv = aUv;
+    vColor = aColor;
     gl_Position = uMvp * vec4(aPosition, 1.0);
 }
 """
@@ -369,8 +401,9 @@ precision mediump float;
 in vec3 vNormal;
 in vec3 vViewPosition;
 in vec2 vUv;
+in vec3 vColor;
 uniform sampler2D uTexture;
-uniform float uClay;
+uniform int uMode;
 out vec4 fragColor;
 void main() {
     vec3 n = normalize(vNormal);
@@ -379,8 +412,8 @@ void main() {
     vec3 key = normalize(vec3(0.45, 0.6, 0.9));
     vec3 fill = normalize(vec3(-0.7, -0.2, 0.5));
     float light = 0.36 + 0.6 * max(dot(n, key), 0.0) + 0.2 * max(dot(n, fill), 0.0);
-    vec3 base = mix(texture(uTexture, vUv).rgb, vec3(0.80, 0.78, 0.74), uClay);
-    float specular = pow(max(dot(n, normalize(key + toEye)), 0.0), 40.0) * mix(0.08, 0.25, uClay);
+    vec3 base = uMode == 0 ? texture(uTexture, vUv).rgb : (uMode == 1 ? vColor : vec3(0.80, 0.78, 0.74));
+    float specular = pow(max(dot(n, normalize(key + toEye)), 0.0), 40.0) * (uMode == 2 ? 0.25 : 0.08);
     float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0) * 0.12;
     fragColor = vec4(base * light + vec3(specular + rim), 1.0);
 }

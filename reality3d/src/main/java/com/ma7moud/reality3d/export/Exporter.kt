@@ -9,15 +9,18 @@ import com.ma7moud.reality3d.mesh.GlbWriter
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.ObjWriter
 import com.ma7moud.reality3d.mesh.StlWriter
+import com.ma7moud.reality3d.scan.Keyframe
+import com.ma7moud.reality3d.scan.PhotoSetWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 
 enum class ExportFormat(val label: String, val extension: String, val mimeType: String, val description: String) {
-    GLB("GLB", "glb", "model/gltf-binary", "One file with the photo's colours. Opens in Windows 3D Viewer, Blender and online glTF viewers."),
-    STL("STL", "stl", "model/stl", "For 3D printing: the shape only, 10 cm on its longest side."),
-    OBJ("OBJ", "zip", "application/zip", "OBJ + MTL + texture in one zip, for Blender, SketchUp or Unreal."),
+    GLB("GLB", "glb", "model/gltf-binary", "One file with the colours. Opens in Windows 3D Viewer, Blender and online glTF viewers."),
+    STL("STL", "stl", "model/stl", "For 3D printing: the shape only, in millimetres."),
+    OBJ("OBJ", "zip", "application/zip", "OBJ with its colours in one zip, for Blender, SketchUp or Unreal."),
+    PHOTOS("Photos", "zip", "application/zip", "The scan photos with the camera positions (in meters), for photogrammetry software on a computer."),
 }
 
 class ExportFile(val format: ExportFormat, val fileName: String, val bytes: ByteArray)
@@ -26,13 +29,16 @@ object Exporter {
 
     private const val MAX_AGE_MS = 24 * 60 * 60 * 1000L
 
-    fun encode(format: ExportFormat, mesh: Mesh3D, photo: Bitmap, baseName: String): ExportFile {
+    /** [photo] textures single-photo models; [keyframes] are a scan's photos for [ExportFormat.PHOTOS]. */
+    fun encode(format: ExportFormat, mesh: Mesh3D, photo: Bitmap?, baseName: String, keyframes: List<Keyframe> = emptyList()): ExportFile {
         val bytes = when (format) {
-            ExportFormat.GLB -> GlbWriter.write(mesh, jpeg(photo), name = baseName)
+            ExportFormat.GLB -> GlbWriter.write(mesh, photo?.let(::jpeg), name = baseName)
             ExportFormat.STL -> StlWriter.write(mesh)
-            ExportFormat.OBJ -> ObjWriter.writeZip(mesh, jpeg(photo), baseName)
+            ExportFormat.OBJ -> ObjWriter.writeZip(mesh, photo?.let(::jpeg), baseName)
+            ExportFormat.PHOTOS -> PhotoSetWriter.write(keyframes)
         }
-        return ExportFile(format, "$baseName.${format.extension}", bytes)
+        val name = if (format == ExportFormat.PHOTOS) "${baseName}_photos" else baseName
+        return ExportFile(format, "$name.${format.extension}", bytes)
     }
 
     private fun jpeg(photo: Bitmap): ByteArray =
@@ -54,6 +60,6 @@ object Exporter {
             clipData = ClipData.newRawUri(file.fileName, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        return Intent.createChooser(send, "Share ${file.format.label} model")
+        return Intent.createChooser(send, "Share ${file.fileName}")
     }
 }

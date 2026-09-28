@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ma7moud.reality3d.MainActivity
@@ -27,6 +28,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -35,9 +37,18 @@ import org.robolectric.annotation.Config
 import java.time.Duration
 import kotlin.math.hypot
 
-/** Fake engines: a dome of depth, a round subject and a canned Gemini Nano answer. */
+/** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
 class TestReality3DApplication : Reality3DApplication() {
-    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), useGlViewer = false)
+    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, useGlViewer = false)
+}
+
+/**
+ * FileProvider keeps its folders in a static map, but Robolectric gives each test a new data folder
+ * while keeping statics, so sharing in a later test would point at an earlier test's folder.
+ */
+internal fun forgetFileProviderFolders() {
+    val cache = FileProvider::class.java.getDeclaredField("sCache").apply { isAccessible = true }.get(null) as HashMap<*, *>
+    synchronized(cache) { cache.clear() }
 }
 
 private class FakeDepth : DepthEngine {
@@ -70,6 +81,9 @@ class Reality3DSmokeTest {
     @get:Rule
     val compose = createAndroidComposeRule<MainActivity>()
 
+    @Before
+    fun setUp() = forgetFileProviderFolders()
+
     /** Waits for [condition], letting delayed main-thread work (like the rebuild debounce) run. */
     private fun waitFor(condition: () -> Boolean) {
         compose.waitUntil(10_000) {
@@ -80,7 +94,8 @@ class Reality3DSmokeTest {
 
     @Test
     fun photoBecomesAModelThatCanBeReshapedAndShared() {
-        compose.onNodeWithText("Take photo").assertIsDisplayed()
+        compose.onNodeWithText("Start 360° scan").assertIsDisplayed()
+        compose.onNodeWithText("Take photo").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Gemini Nano: ").assertExists()
         val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
         compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }

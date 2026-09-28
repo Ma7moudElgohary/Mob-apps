@@ -166,11 +166,12 @@ class MeshBuilderTest {
     fun attributesAreWellFormed() {
         val mesh = MeshBuilder.build(rampDepth(), diskMask, photoWidth, photoHeight, MeshSettings(detail = MeshDetail.HIGH))
         assertEquals(mesh.vertexCount * 3, mesh.normals.size)
-        assertEquals(mesh.vertexCount * 2, mesh.uvs.size)
+        val uvs = mesh.uvs!!
+        assertEquals(mesh.vertexCount * 2, uvs.size)
         for (i in 0 until mesh.vertexCount) {
             val n = sqrt(mesh.normals[i * 3] * mesh.normals[i * 3] + mesh.normals[i * 3 + 1] * mesh.normals[i * 3 + 1] + mesh.normals[i * 3 + 2] * mesh.normals[i * 3 + 2])
             assertEquals(1f, n, 1e-3f)
-            assertTrue(mesh.uvs[i * 2] in 0f..1f && mesh.uvs[i * 2 + 1] in 0f..1f)
+            assertTrue(uvs[i * 2] in 0f..1f && uvs[i * 2 + 1] in 0f..1f)
         }
         for (index in mesh.indices) assertTrue(index in 0 until mesh.vertexCount)
         // Texture follows the photo: the top of the model samples the top of the photo.
@@ -179,7 +180,7 @@ class MeshBuilderTest {
         for (i in 0 until mesh.vertexCount) {
             if (mesh.positions[i * 3 + 1] > topY) {
                 topY = mesh.positions[i * 3 + 1]
-                topV = mesh.uvs[i * 2 + 1]
+                topV = uvs[i * 2 + 1]
             }
         }
         assertTrue(topV < 0.3f)
@@ -252,10 +253,11 @@ class MeshBuilderTest {
             outline += (key and 0xFFFFFFFFL).toInt()
         }
         assertTrue(outline.size > 50)
+        val uvs = mesh.uvs!!
         var worst = 0f
         for (i in outline) {
             // UVs are photo coordinates, so they give the vertex's pixel position directly.
-            val r = hypot(mesh.uvs[i * 2] * (photoWidth - 1) - 200f, mesh.uvs[i * 2 + 1] * (photoHeight - 1) - 150f)
+            val r = hypot(uvs[i * 2] * (photoWidth - 1) - 200f, uvs[i * 2 + 1] * (photoHeight - 1) - 150f)
             worst = max(worst, abs(r - 100f))
         }
         // Within a grid cell of the true outline (399 px / 144 cells ≈ 2.8 px).

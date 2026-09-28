@@ -133,8 +133,9 @@ class ExportWritersTest {
         assertEquals(mesh.triangleCount, lines.count { it.startsWith("f ") })
         // OBJ texture rows start at the bottom of the image.
         val firstVt = lines.first { it.startsWith("vt ") }.split(' ').drop(1).map { it.toFloat() }
-        assertEquals(mesh.uvs[0], firstVt[0], 1e-5f)
-        assertEquals(1f - mesh.uvs[1], firstVt[1], 1e-5f)
+        val uvs = mesh.uvs!!
+        assertEquals(uvs[0], firstVt[0], 1e-5f)
+        assertEquals(1f - uvs[1], firstVt[1], 1e-5f)
         // Plain decimal numbers that any importer reads, whatever the phone's language.
         val numbers = lines.filter { it.startsWith("v ") }.flatMap { it.split(' ').drop(1) }
         assertTrue(numbers.all { Regex("-?\\d+\\.\\d{5}").matches(it) })

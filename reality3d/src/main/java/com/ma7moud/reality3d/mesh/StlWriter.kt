@@ -7,12 +7,13 @@ import kotlin.math.sqrt
 
 /**
  * Binary STL for 3D printing, in millimetres. The model is turned Z-up (the slicer convention), with
- * its front facing -Y, and placed on the build plate (lowest point at Z = 0).
+ * its front facing -Y, and placed on the build plate (lowest point at Z = 0). Real-scale scans keep
+ * their measured size; other models get [longestSideMm] on their longest side.
  */
 object StlWriter {
 
     fun write(mesh: Mesh3D, longestSideMm: Float = 100f): ByteArray {
-        val scale = longestSideMm / max(mesh.longestSide, 1e-6f)
+        val scale = if (mesh.realScale) 1000f else longestSideMm / max(mesh.longestSide, 1e-6f)
         val b = mesh.bounds
         val centerX = (b[0] + b[3]) / 2
         val centerZ = (b[2] + b[5]) / 2
