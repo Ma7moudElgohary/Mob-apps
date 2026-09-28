@@ -148,7 +148,7 @@ class ScanSmokeTest {
         assertTrue(engine.closed)
         compose.onNodeWithText("3D preview").assertExists()
         // The ball (14 cm across) and the block next to it: 20 cm wide, 14 cm deep, 14 cm high.
-        compose.onNodeWithText("Size: ", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Size: ", substring = true).performScrollTo().assertIsDisplayed()
         val sizeText = compose.onNodeWithText("Size: ", substring = true).fetchSemanticsNode().config[SemanticsProperties.Text].joinToString { it.text }
         val numbers = Regex("""(\d+\.\d)""").findAll(sizeText).map { it.value.toFloat() }.toList()
         assertEquals(3, numbers.size)

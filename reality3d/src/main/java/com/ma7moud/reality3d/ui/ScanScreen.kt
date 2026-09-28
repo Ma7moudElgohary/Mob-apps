@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
@@ -41,12 +42,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,7 +69,9 @@ import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanPhase
 import com.ma7moud.reality3d.scan.ScanStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -318,12 +317,23 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
     val scope = rememberCoroutineScope()
     val exporting by viewModel.exporting.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
-    var clay by rememberSaveable { mutableStateOf(false) }
-    var resetRequests by remember { mutableIntStateOf(0) }
     val saveGlb = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.GLB.mimeType), viewModel::savePending)
     val saveStl = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.STL.mimeType), viewModel::savePending)
     val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.OBJ.mimeType), viewModel::savePending)
     val savePly = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(ExportFormat.PLY.mimeType), viewModel::savePending)
+
+    fun shareScreenshot(bitmap: Bitmap) {
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.Default) { Exporter.png(bitmap) }
+                context.startActivity(Exporter.shareIntent(context, Exporter.screenshotName(), "image/png", bytes))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                viewModel.showMessage("Couldn't share the picture: ${e.message ?: e.javaClass.simpleName}.", isError = true)
+            }
+        }
+    }
 
     fun share(format: ExportFormat, budget: GameReadyPack.Budget) {
         scope.launch {
@@ -372,7 +382,16 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onDone) { Text("Done") }
         }
-        ViewerCard(mesh, photo = null, useGlViewer, clay, resetRequests, onToggleClay = { clay = !clay }, onReset = { resetRequests++ })
+        ViewerCard(
+            mesh = mesh,
+            texture = null,
+            photo = null,
+            useGlViewer = useGlViewer,
+            metersPerUnit = 1f,
+            sizeKnown = true,
+            onSetRealLength = null,
+            onScreenshot = { shareScreenshot(it) },
+        )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 "Size: ${oneDecimal(width)} × ${oneDecimal(depth)} × ${oneDecimal(height)} cm",

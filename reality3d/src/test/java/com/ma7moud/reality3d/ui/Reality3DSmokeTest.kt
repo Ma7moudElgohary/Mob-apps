@@ -26,12 +26,14 @@ import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.ShapeHint
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthMap
+import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.Subject
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import com.ma7moud.reality3d.segmentation.SubjectSegmenterEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -42,6 +44,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.time.Duration
 import kotlin.math.hypot
 
@@ -96,6 +100,24 @@ private class FakeAi : ObjectAi {
     override suspend fun describe(photo: Bitmap) = ObjectInsight("Test mug", ShapeHint.ROUND, 90, "Use soft light")
 }
 
+/** The longest side of a binary STL's bounding box. */
+internal fun stlLongestSideMm(bytes: ByteArray): Float {
+    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val count = buffer.getInt(80)
+    val min = FloatArray(3) { Float.POSITIVE_INFINITY }
+    val max = FloatArray(3) { Float.NEGATIVE_INFINITY }
+    for (t in 0 until count) {
+        for (v in 0 until 3) {
+            for (axis in 0 until 3) {
+                val value = buffer.getFloat(84 + t * 50 + 12 + v * 12 + axis * 4)
+                min[axis] = minOf(min[axis], value)
+                max[axis] = maxOf(max[axis], value)
+            }
+        }
+    }
+    return (0 until 3).maxOf { max[it] - min[it] }
+}
+
 @RunWith(AndroidJUnit4::class)
 @Config(sdk = [35], application = TestReality3DApplication::class)
 class Reality3DSmokeTest {
@@ -130,6 +152,20 @@ class Reality3DSmokeTest {
         assertTrue(mesh.solid)
         assertTrue(mesh.subjectIsolated)
         compose.onNodeWithText("3D preview").assertExists()
+
+        // Viewer tools: looks, measuring (no GL in tests, so no points) and the photo comparison.
+        compose.onNodeWithText("Wireframe").performScrollTo().performClick()
+        compose.onNodeWithText("Measure").performScrollTo().performClick()
+        compose.onNodeWithText("Tap the first point on the model.").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Compare with photo").performScrollTo().performClick()
+        compose.onNodeWithContentDescription("Photo and model compared").assertExists()
+        compose.onNodeWithText("Tap the first point on the model.").assertDoesNotExist()
+
+        // A measured length sets the real size, which the exports follow.
+        compose.runOnUiThread { viewModel.setRealLength(0.5f, 0.05f) }
+        assertEquals(0.1f, viewModel.metersPerUnit(mesh), 1e-6f)
+        val stl = runBlocking { viewModel.export(ExportFormat.STL)!! }
+        assertEquals(mesh.longestSide * 0.1f * 1000f, stlLongestSideMm(stl.bytes), 0.01f)
 
         compose.onNodeWithText("Relief").performScrollTo().performClick()
         waitFor { viewModel.state.value.mesh?.solid == false }

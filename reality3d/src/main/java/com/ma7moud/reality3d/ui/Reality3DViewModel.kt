@@ -62,6 +62,8 @@ data class UiState(
     val exporting: Boolean = false,
     /** The objects found in the photo, once it has been looked at. */
     val subjects: SubjectsView? = null,
+    /** The model's real size per unit, once set from a measured length; null until then. */
+    val metersPerUnit: Float? = null,
 )
 
 /** The objects found in the photo and which of them make the model. */
@@ -163,7 +165,10 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         subjects = null
         closeEditor()
         _state.update {
-            it.copy(photo = photo, mesh = null, texture = null, insight = null, subjects = null, progress = null, isError = false, message = null)
+            it.copy(
+                photo = photo, mesh = null, texture = null, insight = null, subjects = null, metersPerUnit = null,
+                progress = null, isError = false, message = null,
+            )
         }
     }
 
@@ -305,6 +310,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         val remake = _state.value.mesh != null
         pipeline?.cancel()
         rebuild?.cancel()
+        // A different outline changes what one model unit is.
+        _state.update { it.copy(metersPerUnit = null) }
         pipeline = viewModelScope.launch {
             try {
                 publishSubjects(found)
@@ -412,14 +419,27 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun retryAi() = services.ai.refresh()
 
+    /** The real size of one unit of [mesh]: set from a measurement, or assumed from the default size. */
+    fun metersPerUnit(mesh: Mesh3D): Float =
+        _state.value.metersPerUnit ?: (Exporter.DEFAULT_LONGEST_SIDE_METERS / mesh.longestSide.coerceAtLeast(1e-6f))
+
+    /** Sets the model's scale: a length measured on it ([modelUnits]) is really [meters] long. */
+    fun setRealLength(modelUnits: Float, meters: Float) {
+        if (modelUnits <= 0f || meters <= 0f) return
+        _state.update { it.copy(metersPerUnit = meters / modelUnits, message = "Real size set. Exports use it too.", isError = false) }
+    }
+
     /** Encodes the current model; null when there is none. */
     suspend fun export(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
         val snapshot = _state.value
         val mesh = snapshot.mesh ?: return null
         val texture = inputs?.texture ?: return null
+        val longestSide = metersPerUnit(mesh) * mesh.longestSide
         _state.update { it.copy(exporting = true) }
         return try {
-            withContext(Dispatchers.Default) { Exporter.encode(format, mesh, texture, baseName(snapshot.insight), budget = budget) }
+            withContext(Dispatchers.Default) {
+                Exporter.encode(format, mesh, texture, baseName(snapshot.insight), budget = budget, longestSideMeters = longestSide)
+            }
         } finally {
             _state.update { it.copy(exporting = false) }
         }

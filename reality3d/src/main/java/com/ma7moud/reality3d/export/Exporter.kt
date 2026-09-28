@@ -19,6 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 enum class ExportFormat(val label: String, val extension: String, val mimeType: String, val description: String) {
@@ -42,9 +45,13 @@ object Exporter {
 
     private const val MAX_AGE_MS = 24 * 60 * 60 * 1000L
 
+    /** The size single-photo models get when the real one isn't known. */
+    const val DEFAULT_LONGEST_SIDE_METERS = 0.2f
+
     /**
      * [texture] textures single-photo models; [keyframes] are a scan's photos for [ExportFormat.PHOTOS];
-     * [budget] sets the triangles of the [ExportFormat.UNREAL] levels of detail.
+     * [budget] sets the triangles of the [ExportFormat.UNREAL] levels of detail. Single-photo models are
+     * exported [longestSideMeters] long; scans keep their measured size.
      *
      * Textured files carry only the part of the photo the model uses. Open reliefs get a PNG whose alpha
      * cuts them out along the subject; closed models, whose rim the cut would open, get a JPEG.
@@ -56,14 +63,16 @@ object Exporter {
         baseName: String,
         keyframes: List<Keyframe> = emptyList(),
         budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM,
+        longestSideMeters: Float = DEFAULT_LONGEST_SIDE_METERS,
     ): ExportFile {
         val cropped = if (texture != null && mesh.uvs != null) TextureBaker.cropUvs(mesh, texture.region) else mesh
+        val size = longestSideMeters
         val bytes = when (format) {
-            ExportFormat.GLB -> GlbWriter.write(cropped, texture?.let { glbTexture(it, mesh.solid) }, name = baseName)
-            ExportFormat.STL -> StlWriter.write(mesh)
-            ExportFormat.OBJ -> ObjWriter.writeZip(cropped, texture?.let { encode(it, alpha = false) }, baseName)
-            ExportFormat.PLY -> PlyWriter.write(mesh, texture?.let { pixels(it.bitmap) })
-            ExportFormat.UNREAL -> GameReadyPack.write(cropped, texture?.let { glbTexture(it, mesh.solid) }, assetName(baseName), budget)
+            ExportFormat.GLB -> GlbWriter.write(cropped, texture?.let { glbTexture(it, mesh.solid) }, size, baseName)
+            ExportFormat.STL -> StlWriter.write(mesh, size * 1000f)
+            ExportFormat.OBJ -> ObjWriter.writeZip(cropped, texture?.let { encode(it, alpha = false) }, baseName, size)
+            ExportFormat.PLY -> PlyWriter.write(mesh, texture?.let { pixels(it.bitmap) }, size)
+            ExportFormat.UNREAL -> GameReadyPack.write(cropped, texture?.let { glbTexture(it, mesh.solid) }, assetName(baseName), budget, size)
             ExportFormat.PHOTOS -> PhotoSetWriter.write(keyframes)
         }
         val name = when (format) {
@@ -115,21 +124,29 @@ object Exporter {
     }
 
     /** Writes the file where the FileProvider serves it and returns a share sheet for it. */
-    suspend fun shareIntent(context: Context, file: ExportFile): Intent {
+    suspend fun shareIntent(context: Context, file: ExportFile): Intent =
+        shareIntent(context, file.fileName, file.format.mimeType, file.bytes)
+
+    suspend fun shareIntent(context: Context, fileName: String, mimeType: String, bytes: ByteArray): Intent {
         val target = withContext(Dispatchers.IO) {
             val directory = File(context.cacheDir, "exports").apply { mkdirs() }
             val now = System.currentTimeMillis()
             directory.listFiles()?.forEach { if (now - it.lastModified() > MAX_AGE_MS) it.delete() }
-            File(directory, file.fileName).apply { writeBytes(file.bytes) }
+            File(directory, fileName).apply { writeBytes(bytes) }
         }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", target)
         val send = Intent(Intent.ACTION_SEND).apply {
-            type = file.format.mimeType
+            type = mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_TITLE, file.fileName)
-            clipData = ClipData.newRawUri(file.fileName, uri)
+            putExtra(Intent.EXTRA_TITLE, fileName)
+            clipData = ClipData.newRawUri(fileName, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        return Intent.createChooser(send, "Share ${file.fileName}")
+        return Intent.createChooser(send, "Share $fileName")
     }
+
+    fun png(bitmap: Bitmap): ByteArray =
+        ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+
+    fun screenshotName(): String = "reality3d_view_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
 }

@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -54,10 +53,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,12 +77,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.min
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ma7moud.reality3d.ai.AiState
@@ -94,11 +86,12 @@ import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
-import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshDetail
 import com.ma7moud.reality3d.mesh.MeshSettings
 import com.ma7moud.reality3d.mesh.ShapeProfile
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.roundToInt
@@ -159,8 +152,6 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var cameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
-    var clay by rememberSaveable { mutableStateOf(false) }
-    var resetRequests by remember { mutableIntStateOf(0) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) viewModel.loadPhoto(uri)
@@ -241,6 +232,19 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
         }
     }
 
+    fun shareScreenshot(bitmap: Bitmap) {
+        scope.launch {
+            try {
+                val bytes = withContext(Dispatchers.Default) { Exporter.png(bitmap) }
+                context.startActivity(Exporter.shareIntent(context, Exporter.screenshotName(), "image/png", bytes))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                viewModel.showMessage("Couldn't share the picture: ${e.message ?: e.javaClass.simpleName}.", isError = true)
+            }
+        }
+    }
+
     val photo = state.photo
     val mesh = state.mesh
     val busy = state.progress != null
@@ -287,12 +291,13 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
         if (photo != null && mesh != null) {
             ViewerCard(
                 mesh = mesh,
-                photo = state.texture ?: photo,
+                texture = state.texture ?: photo,
+                photo = photo,
                 useGlViewer = useGlViewer,
-                clay = clay,
-                resetRequests = resetRequests,
-                onToggleClay = { clay = !clay },
-                onReset = { resetRequests++ },
+                metersPerUnit = viewModel.metersPerUnit(mesh),
+                sizeKnown = state.metersPerUnit != null,
+                onSetRealLength = viewModel::setRealLength,
+                onScreenshot = { shareScreenshot(it) },
             )
             ShapeCard(state.settings, state.rebuilding, viewModel::updateSettings)
         }
@@ -506,72 +511,6 @@ private fun ProgressPanel(progress: Progress) {
             LinearProgressIndicator(Modifier.fillMaxWidth())
         }
     }
-}
-
-@Composable
-internal fun ViewerCard(
-    mesh: Mesh3D,
-    photo: Bitmap?,
-    useGlViewer: Boolean,
-    clay: Boolean,
-    resetRequests: Int,
-    onToggleClay: () -> Unit,
-    onReset: () -> Unit,
-) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(0.9f)) {
-            if (useGlViewer) {
-                MeshViewer(mesh, photo, clay, resetRequests, Modifier.fillMaxSize())
-            } else {
-                Box(Modifier.fillMaxSize().background(Color(0xFF070B12)), contentAlignment = Alignment.Center) {
-                    Text("3D preview")
-                }
-            }
-            Text(
-                "Drag to rotate · pinch to zoom · double-tap to reset",
-                Modifier.align(Alignment.TopCenter).padding(10.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = Color(0xFFB8F5FF),
-            )
-            Text(
-                "${mesh.triangleCount} triangles · " + if (mesh.solid) "closed" else "open",
-                Modifier.align(Alignment.BottomStart).padding(14.dp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(Modifier.align(Alignment.BottomEnd).padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onToggleClay) { Text(if (!clay) "Clay" else if (photo != null) "Photo" else "Colours") }
-                FilledTonalButton(onClick = onReset) { Text("Reset") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MeshViewer(mesh: Mesh3D, photo: Bitmap?, clay: Boolean, resetRequests: Int, modifier: Modifier) {
-    val context = LocalContext.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val view = remember { MeshSurfaceView(context) }
-    DisposableEffect(lifecycle, view) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> view.onResume()
-                Lifecycle.Event.ON_PAUSE -> view.onPause()
-                else -> Unit
-            }
-        }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer) }
-    }
-    LaunchedEffect(resetRequests) { if (resetRequests > 0) view.resetView() }
-    AndroidView(
-        factory = { view },
-        modifier = modifier,
-        update = {
-            it.setScene(mesh, photo)
-            it.setClay(clay)
-        },
-    )
 }
 
 @Composable
