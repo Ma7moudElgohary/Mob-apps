@@ -265,7 +265,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
         if (photo != null && mesh != null) {
             ViewerCard(
                 mesh = mesh,
-                photo = photo,
+                photo = state.texture ?: photo,
                 useGlViewer = useGlViewer,
                 clay = clay,
                 resetRequests = resetRequests,

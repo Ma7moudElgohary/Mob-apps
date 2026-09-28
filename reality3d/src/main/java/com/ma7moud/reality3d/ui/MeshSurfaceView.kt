@@ -151,6 +151,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
     private var uModelView = -1
     private var uTexture = -1
     private var uMode = -1
+    private var uCutout = -1
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
     private val model = FloatArray(16)
@@ -198,6 +199,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
         uModelView = GLES30.glGetUniformLocation(program, "uModelView")
         uTexture = GLES30.glGetUniformLocation(program, "uTexture")
         uMode = GLES30.glGetUniformLocation(program, "uMode")
+        uCutout = GLES30.glGetUniformLocation(program, "uCutout")
         buffers.fill(0)
         texture = 0
         uploadedMesh = null
@@ -261,6 +263,7 @@ private class MeshRenderer(private val onSpinFinished: () -> Unit) : GLSurfaceVi
             else -> MODE_CLAY
         }
         GLES30.glUniform1i(uMode, mode)
+        GLES30.glUniform1i(uCutout, if (uploadedMesh?.solid == false) 1 else 0)
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, texture)
         GLES30.glUniform1i(uTexture, 0)
@@ -404,15 +407,19 @@ in vec2 vUv;
 in vec3 vColor;
 uniform sampler2D uTexture;
 uniform int uMode;
+uniform int uCutout;
 out vec4 fragColor;
 void main() {
+    vec4 texel = texture(uTexture, vUv);
+    // Open reliefs are cut out along the subject mask kept in the texture's alpha.
+    if (uMode == 0 && uCutout == 1 && texel.a < 0.5) discard;
     vec3 n = normalize(vNormal);
     if (!gl_FrontFacing) n = -n;
     vec3 toEye = normalize(-vViewPosition);
     vec3 key = normalize(vec3(0.45, 0.6, 0.9));
     vec3 fill = normalize(vec3(-0.7, -0.2, 0.5));
     float light = 0.36 + 0.6 * max(dot(n, key), 0.0) + 0.2 * max(dot(n, fill), 0.0);
-    vec3 base = uMode == 0 ? texture(uTexture, vUv).rgb : (uMode == 1 ? vColor : vec3(0.80, 0.78, 0.74));
+    vec3 base = uMode == 0 ? texel.rgb : (uMode == 1 ? vColor : vec3(0.80, 0.78, 0.74));
     float specular = pow(max(dot(n, normalize(key + toEye)), 0.0), 40.0) * (uMode == 2 ? 0.25 : 0.08);
     float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0) * 0.12;
     fragColor = vec4(base * light + vec3(specular + rim), 1.0);

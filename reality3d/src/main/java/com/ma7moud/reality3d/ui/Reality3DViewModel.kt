@@ -15,10 +15,12 @@ import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
+import com.ma7moud.reality3d.export.ModelTexture
 import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshBuilder
 import com.ma7moud.reality3d.mesh.MeshSettings
+import com.ma7moud.reality3d.mesh.TextureBaker
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +42,8 @@ data class Progress(val label: String, val fraction: Float?)
 data class UiState(
     val photo: Bitmap? = null,
     val mesh: Mesh3D? = null,
+    /** The photo prepared as the model's texture (padded background, mask in alpha). */
+    val texture: Bitmap? = null,
     val settings: MeshSettings = MeshSettings(),
     val progress: Progress? = null,
     val message: String? = null,
@@ -69,7 +73,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     /** What the current photo's model is built from; settings changes rebuild from it without the models. */
-    private class Inputs(val photo: Bitmap, val depth: DepthMap, val mask: SubjectMask?)
+    private class Inputs(val photo: Bitmap, val depth: DepthMap, val mask: SubjectMask?, val texture: ModelTexture)
 
     private var inputs: Inputs? = null
     private var pipeline: Job? = null
@@ -106,7 +110,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         rebuild?.cancel()
         inputs = null
         _state.update {
-            it.copy(photo = photo, mesh = null, insight = null, progress = null, isError = false, message = null)
+            it.copy(photo = photo, mesh = null, texture = null, insight = null, progress = null, isError = false, message = null)
         }
     }
 
@@ -132,7 +136,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                     null
                 }
                 report("Estimating depth…", null)
-                val source = Inputs(photo, services.depth.estimate(photo, mask), mask)
+                val depth = services.depth.estimate(photo, mask)
+                val source = Inputs(photo, depth, mask, withContext(Dispatchers.Default) { bakeTexture(photo, mask) })
                 _state.update { it.copy(depthBackend = services.depth.backendSummary) }
                 inputs = source
                 report("Building the 3D model…", null)
@@ -141,6 +146,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.update {
                     it.copy(
                         mesh = mesh,
+                        texture = source.texture.bitmap,
                         progress = null,
                         isError = false,
                         message = if (mesh.subjectIsolated) null else NO_SUBJECT_MESSAGE,
@@ -218,13 +224,27 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     suspend fun export(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
         val snapshot = _state.value
         val mesh = snapshot.mesh ?: return null
-        val photo = snapshot.photo ?: return null
+        val texture = inputs?.texture ?: return null
         _state.update { it.copy(exporting = true) }
         return try {
-            withContext(Dispatchers.Default) { Exporter.encode(format, mesh, photo, baseName(snapshot.insight), budget = budget) }
+            withContext(Dispatchers.Default) { Exporter.encode(format, mesh, texture, baseName(snapshot.insight), budget = budget) }
         } finally {
             _state.update { it.copy(exporting = false) }
         }
+    }
+
+    /**
+     * The photo with its background padded by the subject's colours and the mask in alpha. The bitmap
+     * keeps alpha unpremultiplied, as OpenGL and glTF expect.
+     */
+    private fun bakeTexture(photo: Bitmap, mask: SubjectMask?): ModelTexture {
+        val pixels = IntArray(photo.width * photo.height)
+        photo.getPixels(pixels, 0, photo.width, 0, 0, photo.width, photo.height)
+        val baked = TextureBaker.bake(pixels, photo.width, photo.height, mask)
+        val bitmap = Bitmap.createBitmap(photo.width, photo.height, Bitmap.Config.ARGB_8888)
+        bitmap.isPremultiplied = false
+        bitmap.setPixels(baked, 0, photo.width, 0, 0, photo.width, photo.height)
+        return ModelTexture(bitmap, TextureBaker.subjectRegion(mask))
     }
 
     /** Keeps an encoded file while the system "save as" screen is open. */
