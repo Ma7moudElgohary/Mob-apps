@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.view.View
 import com.ma7moud.reality3d.mesh.Mesh3D
+import com.ma7moud.reality3d.quality.QualityReport
 import kotlinx.coroutines.flow.StateFlow
 
 enum class ScanPhase { STARTING, FIND_SURFACE, PLACE_BOX, READY, SCANNING, BUILDING, FAILED }
@@ -35,7 +36,7 @@ class ScanStatus(
 }
 
 /** A finished scan: the model, the photos it was coloured from, and how good the capture was. */
-class ScanCapture(val mesh: Mesh3D, val keyframes: List<Keyframe>, val quality: ScanQuality)
+class ScanCapture(val mesh: Mesh3D, val keyframes: List<Keyframe>, val quality: QualityReport)
 
 /** A 360° scanning session with its own camera view. */
 interface ScanEngine {

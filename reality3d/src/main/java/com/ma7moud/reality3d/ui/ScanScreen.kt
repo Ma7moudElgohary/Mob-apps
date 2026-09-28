@@ -66,13 +66,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
+import com.ma7moud.reality3d.quality.QualityReport
 import com.ma7moud.reality3d.scan.CoachTip
 import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanCoach
 import com.ma7moud.reality3d.scan.ScanPhase
-import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -442,7 +442,11 @@ private fun ScanResult(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        val saved by viewModel.saved.collectAsStateWithLifecycle()
         QualityCard(capture.quality, onAddViews)
+        OutlinedButton(onClick = viewModel::saveProject, enabled = saved !== capture, modifier = Modifier.fillMaxWidth()) {
+            Text(if (saved === capture) "Saved to My models" else "Save to My models")
+        }
         message?.let { (text, isError) ->
             Text(text, color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -460,30 +464,13 @@ private fun ScanResult(
 
 /** The scan's score, what held it back, and the way to fix it: more views of the same scan. */
 @Composable
-private fun QualityCard(quality: ScanQuality, onAddViews: () -> Unit) {
-    val color = when {
-        quality.score >= 85 -> Covered
-        quality.score >= 70 -> MaterialTheme.colorScheme.primary
-        else -> Warning
-    }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Scan quality", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text("${quality.score}/100 · ${quality.grade}", style = MaterialTheme.typography.titleMedium, color = color, fontWeight = FontWeight.SemiBold)
-            }
-            LinearProgressIndicator(progress = { quality.score / 100f }, modifier = Modifier.fillMaxWidth(), color = color)
-            if (quality.issues.isEmpty()) {
-                Text("Every side was covered with good depth.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                quality.issues.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            }
-            val addViews = @Composable { Text("Add more views to this scan") }
-            if (quality.score < 70) {
-                Button(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { addViews() }
-            } else {
-                OutlinedButton(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { addViews() }
-            }
+private fun QualityCard(quality: QualityReport, onAddViews: () -> Unit) {
+    QualityCard("Scan quality", quality, goodText = "Every side was covered with good depth.") {
+        val label = @Composable { Text("Add more views to this scan") }
+        if (quality.score < 70) {
+            Button(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { label() }
+        } else {
+            OutlinedButton(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { label() }
         }
     }
 }

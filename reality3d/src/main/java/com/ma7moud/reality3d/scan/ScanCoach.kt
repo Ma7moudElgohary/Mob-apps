@@ -1,5 +1,6 @@
 package com.ma7moud.reality3d.scan
 
+import com.ma7moud.reality3d.quality.QualityReport
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -110,43 +111,33 @@ object ScanCoach {
     private fun warning(text: String) = CoachTip(text, CoachTip.Kind.WARNING)
 }
 
-/** How complete and trustworthy a finished scan is, 0 to 100, and what would improve it. */
-data class ScanQuality(val score: Int, val issues: List<String>) {
+/** How complete and trustworthy a finished scan is, and what would improve it. */
+object ScanQuality {
 
-    val grade: String
-        get() = when {
-            score >= 85 -> "Excellent"
-            score >= 70 -> "Good"
-            score >= 50 -> "Fair"
-            else -> "Poor"
+    fun assess(coverage: BooleanArray, photos: Int, depthFrames: Int, depthQuality: Float?): QualityReport {
+        val covered = coverage.count { it }.toFloat() / coverage.size
+        val issues = ArrayList<String>()
+        val ringNames = listOf("low", "45°", "high")
+        for (ring in 0 until CoverageTracker.RINGS) {
+            val fraction = ScanCoach.ringFraction(coverage, ring)
+            if (fraction < 0.75f) issues += "Some ${ringNames[ring]} views are missing (${(fraction * 100).roundToInt()}% of that ring)."
         }
-
-    companion object {
-        fun assess(coverage: BooleanArray, photos: Int, depthFrames: Int, depthQuality: Float?): ScanQuality {
-            val covered = coverage.count { it }.toFloat() / coverage.size
-            val issues = ArrayList<String>()
-            val ringNames = listOf("low", "45°", "high")
-            for (ring in 0 until CoverageTracker.RINGS) {
-                val fraction = ScanCoach.ringFraction(coverage, ring)
-                if (fraction < 0.75f) issues += "Some ${ringNames[ring]} views are missing (${(fraction * 100).roundToInt()}% of that ring)."
-            }
-            if (!coverage[CoverageTracker.TOP_CELL]) issues += "No view from straight above, so the top may be rough."
-            if (photos < GOOD_PHOTOS * 2 / 3) issues += "Only $photos photos, so the colours may be patchy."
-            if (depthFrames < GOOD_DEPTH_FRAMES * 2 / 3) issues += "Only $depthFrames depth maps, so the shape may be rough."
-            if (depthQuality != null && depthQuality < 0.4f) issues += "The depth was weak: more light or a textured surface underneath helps."
-            val score = covered * 55f +
-                min(1f, photos / GOOD_PHOTOS.toFloat()) * 15f +
-                min(1f, depthFrames / GOOD_DEPTH_FRAMES.toFloat()) * 15f +
-                (depthQuality ?: UNKNOWN_DEPTH_QUALITY).coerceIn(0f, 1f) * 15f
-            return ScanQuality(score.roundToInt().coerceIn(0, 100), issues)
-        }
-
-        private const val GOOD_PHOTOS = 36
-        private const val GOOD_DEPTH_FRAMES = 60
-
-        /** Smoothed depth has no confidence map; count it as fair. */
-        private const val UNKNOWN_DEPTH_QUALITY = 0.6f
+        if (!coverage[CoverageTracker.TOP_CELL]) issues += "No view from straight above, so the top may be rough."
+        if (photos < GOOD_PHOTOS * 2 / 3) issues += "Only $photos photos, so the colours may be patchy."
+        if (depthFrames < GOOD_DEPTH_FRAMES * 2 / 3) issues += "Only $depthFrames depth maps, so the shape may be rough."
+        if (depthQuality != null && depthQuality < 0.4f) issues += "The depth was weak: more light or a textured surface underneath helps."
+        val score = covered * 55f +
+            min(1f, photos / GOOD_PHOTOS.toFloat()) * 15f +
+            min(1f, depthFrames / GOOD_DEPTH_FRAMES.toFloat()) * 15f +
+            (depthQuality ?: UNKNOWN_DEPTH_QUALITY).coerceIn(0f, 1f) * 15f
+        return QualityReport(score.roundToInt().coerceIn(0, 100), issues)
     }
+
+    private const val GOOD_PHOTOS = 36
+    private const val GOOD_DEPTH_FRAMES = 60
+
+    /** Smoothed depth has no confidence map; count it as fair. */
+    private const val UNKNOWN_DEPTH_QUALITY = 0.6f
 }
 
 /** How much of the box, as the depth camera sees it, has depth ARCore is confident about. */

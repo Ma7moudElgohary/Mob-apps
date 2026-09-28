@@ -131,26 +131,56 @@ private val Muted = Color(0xFF6B7A94)
 fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
     MaterialTheme(colorScheme = RealityColors) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            var scanning by rememberSaveable { mutableStateOf(false) }
+            var destination by rememberSaveable { mutableStateOf(Destination.HOME) }
+            var projectId by rememberSaveable { mutableStateOf<String?>(null) }
+            val projects = viewModel<ProjectsViewModel>()
             val editor by viewModel.editor.collectAsStateWithLifecycle()
             val session = editor
+            val openId = projectId
+            fun open(id: String) {
+                projectId = id
+                destination = Destination.PROJECT
+            }
             when {
-                scanning -> ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { scanning = false })
+                destination == Destination.SCAN -> ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { destination = Destination.HOME })
                 session != null -> MaskEditorScreen(
                     session,
                     onCancel = { viewModel.finishEditing(apply = false) },
                     onDone = { viewModel.finishEditing(apply = true) },
                 )
-                else -> Reality3DScreen(viewModel, useGlViewer, onScan = { scanning = true })
+                destination == Destination.GALLERY -> GalleryScreen(projects, onOpen = ::open, onBack = { destination = Destination.HOME })
+                destination == Destination.PROJECT && openId != null -> ProjectScreen(projects, openId, useGlViewer, onBack = {
+                    projects.close()
+                    destination = Destination.GALLERY
+                })
+                else -> Reality3DScreen(
+                    viewModel,
+                    projects,
+                    useGlViewer,
+                    onScan = { destination = Destination.SCAN },
+                    onGallery = { destination = Destination.GALLERY },
+                    onOpenProject = ::open,
+                )
             }
         }
     }
 }
 
+/** The app's screens besides the mask editor, which opens over the home screen. */
+private enum class Destination { HOME, SCAN, GALLERY, PROJECT }
+
 @Composable
-private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean, onScan: () -> Unit) {
+private fun Reality3DScreen(
+    viewModel: Reality3DViewModel,
+    projectsViewModel: ProjectsViewModel,
+    useGlViewer: Boolean,
+    onScan: () -> Unit,
+    onGallery: () -> Unit,
+    onOpenProject: (String) -> Unit,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val ai by viewModel.aiState.collectAsStateWithLifecycle()
+    val projects by projectsViewModel.projects.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var cameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
@@ -260,6 +290,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
     ) {
         Header()
         ScanCard(onScan)
+        projects?.takeIf { it.isNotEmpty() }?.let { MyModelsRow(it, onOpen = onOpenProject, onSeeAll = onGallery) }
         Text(
             "Or from a single photo",
             style = MaterialTheme.typography.titleSmall,
@@ -277,6 +308,9 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
             onUseAll = viewModel::useAllSubjects,
             onEditOutline = viewModel::openEditor,
         )
+        state.photoQuality?.let {
+            QualityCard("Photo quality", it, goodText = "Sharp, well lit and cleanly separated: this photo should work well.")
+        }
         if (photo != null && mesh == null) {
             Button(
                 onClick = viewModel::generate,
@@ -301,6 +335,14 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
                 onSetRealLength = viewModel::setRealLength,
                 onScreenshot = { shareScreenshot(it) },
             )
+            val saved = state.savedMesh === mesh
+            OutlinedButton(
+                onClick = viewModel::saveProject,
+                enabled = !saved && !state.saving && !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (saved) "Saved to My models" else if (state.saving) "Saving…" else "Save to My models")
+            }
             ShapeCard(state.settings, state.rebuilding, viewModel::updateSettings)
         }
         if (photo != null) {
@@ -779,7 +821,7 @@ private fun AboutCard() {
 }
 
 /** The single-photo model has no scan photos to export. */
-private val SINGLE_PHOTO_FORMATS = listOf(ExportFormat.GLB, ExportFormat.STL, ExportFormat.OBJ, ExportFormat.PLY, ExportFormat.UNREAL)
+internal val SINGLE_PHOTO_FORMATS = listOf(ExportFormat.GLB, ExportFormat.STL, ExportFormat.OBJ, ExportFormat.PLY, ExportFormat.UNREAL)
 
 private fun createCameraUri(context: Context): Uri {
     val directory = File(context.cacheDir, "camera").apply { mkdirs() }

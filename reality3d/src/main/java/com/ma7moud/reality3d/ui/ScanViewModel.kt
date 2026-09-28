@@ -2,8 +2,11 @@ package com.ma7moud.reality3d.ui
 
 import android.app.Activity
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import androidx.core.graphics.createBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ma7moud.reality3d.Reality3DApplication
@@ -11,6 +14,8 @@ import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
+import com.ma7moud.reality3d.project.ProjectDraft
+import com.ma7moud.reality3d.project.ProjectKind
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanSupport
@@ -55,6 +60,13 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _exporting = MutableStateFlow(false)
     val exporting: StateFlow<Boolean> = _exporting.asStateFlow()
+
+    private val _saved = MutableStateFlow<ScanCapture?>(null)
+
+    /** The capture last saved to My models. */
+    val saved: StateFlow<ScanCapture?> = _saved.asStateFlow()
+
+    private val projects = (application as Reality3DApplication).services.projects
 
     var engine: ScanEngine? = null
         private set
@@ -170,6 +182,46 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Saves the scanned model to My models, with its first photo as the thumbnail. */
+    fun saveProject() {
+        val capture = (_screen.value as? ScanScreenState.Result)?.capture ?: return
+        if (_saved.value === capture) return
+        viewModelScope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) {
+                    projects.save(
+                        ProjectDraft(
+                            name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date()),
+                            kind = ProjectKind.SCAN,
+                            mesh = capture.mesh,
+                            thumbnail = thumbnailOf(capture) ?: createBitmap(8, 8),
+                            metersPerUnit = 1f,
+                            sizeKnown = true,
+                            quality = capture.quality,
+                        ),
+                    )
+                }
+                _saved.value = capture
+                _message.value = "Saved to My models as “${info.name}”." to false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Saving the scan failed", e)
+                _message.value = "Couldn't save the scan: ${e.message ?: e.javaClass.simpleName}." to true
+            }
+        }
+    }
+
+    /** The first scan photo, small. */
+    private fun thumbnailOf(capture: ScanCapture): Bitmap? {
+        val jpeg = capture.keyframes.firstOrNull()?.jpeg ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= THUMBNAIL) sample *= 2
+        return BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+
     fun holdForSaving(file: ExportFile) {
         pendingSave = file
     }
@@ -204,5 +256,6 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         const val TAG = "Reality3DScan"
         const val CHECK_ATTEMPTS = 20
         const val CHECK_DELAY_MS = 300L
+        const val THUMBNAIL = 320
     }
 }

@@ -6,12 +6,17 @@ import android.os.Looper
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.core.content.FileProvider
@@ -52,7 +57,7 @@ import kotlin.math.hypot
 
 /** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
 class TestReality3DApplication : Reality3DApplication() {
-    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, useGlViewer = false)
+    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), useGlViewer = false)
 }
 
 /**
@@ -132,6 +137,8 @@ class Reality3DSmokeTest {
     @Before
     fun setUp() = forgetFileProviderFolders()
 
+    private fun waitForText(text: String) = waitFor { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
+
     /** Waits for [condition], letting delayed main-thread work (like the rebuild debounce) run. */
     private fun waitFor(condition: () -> Boolean) {
         compose.waitUntil(10_000) {
@@ -191,6 +198,45 @@ class Reality3DSmokeTest {
         assertNotNull(send)
         assertEquals("model/gltf-binary", send!!.type)
         assertFalse(viewModel.state.value.isError)
+    }
+
+    @Test
+    fun savedModelsReopenFromTheGallery() {
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }
+        waitFor { viewModel.state.value.subjects != null && viewModel.state.value.progress == null }
+        // The photo is rated as soon as its objects are found: a blank photo has no detail at all.
+        compose.onNodeWithText("Photo quality").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("• The photo looks blurry. Hold the phone steady and tap the object to focus.").assertExists()
+        compose.onNodeWithText("Make 3D model").performScrollTo().performClick()
+        waitFor { viewModel.state.value.mesh != null && viewModel.state.value.progress == null }
+
+        compose.onNodeWithText("Save to My models").performScrollTo().performClick()
+        waitFor { viewModel.state.value.savedMesh != null }
+        compose.onNodeWithText("Saved to My models").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithText("See all (1)").performScrollTo().performClick()
+
+        waitForText("My models")
+        val name = viewModel.state.value.message!!.substringAfter("“").substringBefore("”")
+        compose.onNodeWithText(name).assertIsDisplayed().performClick()
+        waitForText("Rename")
+        compose.onNodeWithText("3D preview").assertExists()
+        compose.onNodeWithText("From a photo", substring = true).performScrollTo().assertIsDisplayed()
+
+        compose.onNodeWithText("Share").performScrollTo().performClick()
+        waitFor { shadowOf(compose.activity).peekNextStartedActivity() != null }
+        @Suppress("DEPRECATION")
+        val send = shadowOf(compose.activity).nextStartedActivity.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+        assertEquals("model/gltf-binary", send!!.type)
+
+        compose.onNodeWithText("Rename").performScrollTo().performClick()
+        compose.onNode(hasSetTextAction() and hasText(name)).performTextReplacement("Kitchen mug")
+        compose.onNodeWithText("Save").performClick()
+        waitForText("Kitchen mug")
+
+        compose.onNodeWithText("Delete this model").performScrollTo().performClick()
+        compose.onNodeWithText("Delete").performClick()
+        waitForText("No saved models yet. Make one from a photo or a 360° scan, then tap Save to My models.")
     }
 
     @Test

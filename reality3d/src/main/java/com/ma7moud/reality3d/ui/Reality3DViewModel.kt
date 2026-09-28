@@ -23,6 +23,10 @@ import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshBuilder
 import com.ma7moud.reality3d.mesh.MeshSettings
 import com.ma7moud.reality3d.mesh.TextureBaker
+import com.ma7moud.reality3d.project.ProjectDraft
+import com.ma7moud.reality3d.project.ProjectKind
+import com.ma7moud.reality3d.quality.PhotoQuality
+import com.ma7moud.reality3d.quality.QualityReport
 import com.ma7moud.reality3d.segmentation.MaskEdit
 import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.SubjectMask
@@ -64,6 +68,11 @@ data class UiState(
     val subjects: SubjectsView? = null,
     /** The model's real size per unit, once set from a measured length; null until then. */
     val metersPerUnit: Float? = null,
+    /** How well the photo will work, once its objects are known. */
+    val photoQuality: QualityReport? = null,
+    val saving: Boolean = false,
+    /** The model last saved to My models, to show it is saved. */
+    val savedMesh: Mesh3D? = null,
 )
 
 /** The objects found in the photo and which of them make the model. */
@@ -103,6 +112,10 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         val editHeight: Int,
         /** The photo's brightness at editing resolution, for snapping outlines to its edges. */
         val guide: FloatArray,
+        /** The photo at the size photo quality is measured at. */
+        val analysis: IntArray,
+        val analysisWidth: Int,
+        val analysisHeight: Int,
     ) {
         var selection: Set<Int> = emptySet()
 
@@ -118,6 +131,9 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     val editor: StateFlow<MaskEditorSession?> = _editor.asStateFlow()
 
     private var subjects: PhotoSubjects? = null
+
+    /** The mask last shown, for rating the photo again. */
+    private var lastMask: SubjectMask? = null
     private var inputs: Inputs? = null
     private var pipeline: Job? = null
     private var rebuild: Job? = null
@@ -163,11 +179,12 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     private fun showPhoto(photo: Bitmap) {
         inputs = null
         subjects = null
+        lastMask = null
         closeEditor()
         _state.update {
             it.copy(
                 photo = photo, mesh = null, texture = null, insight = null, subjects = null, metersPerUnit = null,
-                progress = null, isError = false, message = null,
+                photoQuality = null, savedMesh = null, progress = null, isError = false, message = null,
             )
         }
     }
@@ -196,11 +213,17 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun examine(photo: Bitmap, segmentation: Segmentation?): PhotoSubjects {
         val (w, h) = MaskEdit.sizeFor(photo.width, photo.height)
-        val small = if (w == photo.width && h == photo.height) photo else photo.scale(w, h)
-        val pixels = IntArray(w * h)
-        small.getPixels(pixels, 0, w, 0, 0, w, h)
+        val pixels = pixelsAt(photo, w, h)
+        val (aw, ah) = MaskEdit.sizeFor(photo.width, photo.height, longest = PhotoQuality.ANALYSIS_SIZE)
+        return PhotoSubjects(photo, segmentation, w, h, MaskEdit.brightness(pixels), pixelsAt(photo, aw, ah), aw, ah)
+    }
+
+    private fun pixelsAt(photo: Bitmap, width: Int, height: Int): IntArray {
+        val small = if (width == photo.width && height == photo.height) photo else photo.scale(width, height)
+        val pixels = IntArray(width * height)
+        small.getPixels(pixels, 0, width, 0, 0, width, height)
         if (small !== photo) small.recycle()
-        return PhotoSubjects(photo, segmentation, w, h, MaskEdit.brightness(pixels))
+        return pixels
     }
 
     /** The mask the model is made from: the chosen objects, with any outline painted by hand. */
@@ -219,12 +242,76 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun publishSubjects(found: PhotoSubjects) {
         val selection = found.selection
         val mask = currentMask(found)
-        val overlay = withContext(Dispatchers.Default) {
+        val insight = _state.value.insight
+        val (overlay, quality) = withContext(Dispatchers.Default) {
             val pixels = MaskOverlay.render(mask, found.segmentation, selection, found.editWidth, found.editHeight)
-            MaskOverlay.toBitmap(pixels, found.editWidth, found.editHeight)
+            MaskOverlay.toBitmap(pixels, found.editWidth, found.editHeight) to
+                PhotoQuality.assess(found.analysis, found.analysisWidth, found.analysisHeight, mask, insight)
         }
+        lastMask = mask
         if (subjects !== found) return
-        _state.update { it.copy(subjects = SubjectsView(found.count, selection, overlay, found.edit != null)) }
+        _state.update { it.copy(subjects = SubjectsView(found.count, selection, overlay, found.edit != null), photoQuality = quality) }
+    }
+
+    /** Rates the photo again, for example once Gemini Nano has said the object is shiny. */
+    private fun rateAgain() {
+        val found = subjects ?: return
+        val mask = lastMask
+        val insight = _state.value.insight
+        viewModelScope.launch {
+            val quality = withContext(Dispatchers.Default) {
+                PhotoQuality.assess(found.analysis, found.analysisWidth, found.analysisHeight, mask, insight)
+            }
+            if (subjects === found) _state.update { it.copy(photoQuality = quality) }
+        }
+    }
+
+    /** Saves the model, its texture and photo to My models. */
+    fun saveProject() {
+        val snapshot = _state.value
+        val mesh = snapshot.mesh ?: return
+        val source = inputs ?: return
+        if (snapshot.saving) return
+        _state.update { it.copy(saving = true) }
+        viewModelScope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) {
+                    services.projects.save(
+                        ProjectDraft(
+                            name = snapshot.insight?.name ?: ("Photo model " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date())),
+                            kind = ProjectKind.PHOTO,
+                            mesh = mesh,
+                            thumbnail = thumbnailOf(source.photo, source.texture.region),
+                            metersPerUnit = metersPerUnit(mesh),
+                            sizeKnown = snapshot.metersPerUnit != null,
+                            quality = snapshot.photoQuality,
+                            texture = source.texture.bitmap,
+                            textureRegion = source.texture.region,
+                            photo = source.photo,
+                        ),
+                    )
+                }
+                _state.update { it.copy(savedMesh = mesh, message = "Saved to My models as “${info.name}”.", isError = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Saving the project failed", e)
+                fail("Couldn't save the model: ${e.readable()}.")
+            } finally {
+                _state.update { it.copy(saving = false) }
+            }
+        }
+    }
+
+    /** The part of the photo the model uses, at most [THUMBNAIL] pixels across. */
+    private fun thumbnailOf(photo: Bitmap, region: FloatArray): Bitmap {
+        val left = (region[0] * photo.width).toInt().coerceIn(0, photo.width - 1)
+        val top = (region[1] * photo.height).toInt().coerceIn(0, photo.height - 1)
+        val width = ((region[2] - region[0]) * photo.width).toInt().coerceIn(1, photo.width - left)
+        val height = ((region[3] - region[1]) * photo.height).toInt().coerceIn(1, photo.height - top)
+        val scale = minOf(1f, THUMBNAIL.toFloat() / maxOf(width, height))
+        val crop = Bitmap.createBitmap(photo, left, top, width, height)
+        return if (scale >= 1f) crop else crop.scale((width * scale).toInt().coerceAtLeast(1), (height * scale).toInt().coerceAtLeast(1))
     }
 
     fun generate() {
@@ -404,6 +491,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                 if (_state.value.photo !== photo) return@launch
                 _state.update { it.copy(insight = insight, message = null, isError = false) }
                 updateSettings { it.withInsight(insight) }
+                rateAgain()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -507,6 +595,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     companion object {
         private const val TAG = "Reality3D"
         private const val REBUILD_DELAY_MS = 120L
+        private const val THUMBNAIL = 320
         const val NO_SUBJECT_MESSAGE =
             "Couldn't separate the subject from the background, so the whole photo was used. A plain background helps."
 
