@@ -242,7 +242,7 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
         )
-        StatusCard(ai, state.depthModelReady, state.depthDownloadBytes, onGetAi = viewModel::downloadAi)
+        StatusCard(ai, state.depthModelReady, state.depthDownloadBytes, state.depthBackend, onGetAi = viewModel::downloadAi)
         PhotoCard(photo, enabled = !busy, onCamera = { takePhoto() }, onGallery = { pickPhoto() })
         if (photo != null && mesh == null) {
             Button(
@@ -338,7 +338,7 @@ private fun ScanCard(onScan: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(ai: AiState, depthReady: Boolean, depthBytes: Long, onGetAi: () -> Unit) {
+private fun StatusCard(ai: AiState, depthReady: Boolean, depthBytes: Long, depthBackend: String?, onGetAi: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val (aiText, aiColor) = when (ai) {
@@ -354,8 +354,12 @@ private fun StatusCard(ai: AiState, depthReady: Boolean, depthBytes: Long, onGet
                 if (ai == AiState.NeedsDownload) TextButton(onClick = onGetAi) { Text("Get") }
             }
             StatusLine(
-                "Depth model",
-                if (depthReady) "ready" else "downloads on first use (${Reality3DViewModel.formatBytes(depthBytes)})",
+                "Depth Anything V2",
+                when {
+                    !depthReady -> "downloads on first use (${Reality3DViewModel.formatBytes(depthBytes)})"
+                    depthBackend != null -> "ready · $depthBackend"
+                    else -> "ready (picks CPU, GPU or NPU on first use)"
+                },
                 if (depthReady) Good else Waiting,
             )
         }
@@ -685,7 +689,7 @@ private fun AboutCard() {
     ) {
         Text(
             "How it works: the 360° scan fuses ARCore's depth maps into one closed surface and colours it from the " +
-                "photos taken on the way round. From a single photo, ML Kit cuts the subject out, MiDaS estimates its " +
+                "photos taken on the way round. From a single photo, ML Kit cuts the subject out, Depth Anything V2 estimates its " +
                 "depth and the outline is inflated into a rounded shape; one photo cannot show the back, so Solid mode " +
                 "mirrors the front. Everything runs on the phone.",
             Modifier.padding(14.dp),

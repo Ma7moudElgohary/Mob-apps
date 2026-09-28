@@ -13,7 +13,7 @@ import kotlin.math.sqrt
  * Turns one photo's depth map and subject mask into a textured triangle mesh.
  *
  * A vertex grid is laid over the photo and only the subject's vertices are kept. Their depth comes from:
- *  - MiDaS relative depth, normalised inside the subject, which tilts and bends the model and adds relief;
+ *  - relative depth (Depth Anything V2), normalised inside the subject, which tilts and bends the model and adds relief;
  *  - "inflation" ([Inflation]), which puffs the silhouette up so every part gets a rounded thickness
  *    that matches how wide it is.
  * In solid mode a mirrored back surface shares the silhouette vertices with the front, so the mesh is
@@ -34,7 +34,7 @@ object MeshBuilder {
     /** A nearly flat subject is not stretched to more than this share of the photo's depth range. */
     private const val MIN_RELATIVE_RANGE = 0.25f
 
-    /** MiDaS smears depth edges over about this many depth-map pixels. */
+    /** Depth models smear depth across edges over about this many depth-map pixels. */
     private const val DEPTH_EDGE_BLUR_PX = 4f
 
     fun build(
@@ -70,7 +70,7 @@ object MeshBuilder {
         val gy = FloatArray(n) { (it / cols).toFloat() }
         if (isolated) snapBoundary(gx, gy, topology, foreground, confidence, grid)
 
-        // MiDaS depth per vertex, with the smeared rim replaced by values from further inside.
+        // Depth per vertex, with the smeared rim replaced by values from further inside.
         val raw = FloatArray(n)
         var usedCount = 0
         for (i in 0 until n) {
@@ -79,7 +79,7 @@ object MeshBuilder {
             usedCount++
         }
         if (isolated) {
-            val band = ceil(DEPTH_EDGE_BLUR_PX * max((cols - 1f) / depth.width, (rows - 1f) / depth.height))
+            val band = ceil(DEPTH_EDGE_BLUR_PX * max((cols - 1f) / depth.photoWidth, (rows - 1f) / depth.photoHeight))
                 .toInt().coerceIn(2, 8)
             extendInteriorDepth(raw, topology, grid, band)
         }
@@ -479,7 +479,7 @@ object MeshBuilder {
     }
 
     /**
-     * MiDaS blurs depth across the subject's outline, which would curl the rim towards the background.
+     * Depth models blur depth across the subject's outline, which would curl the rim towards the background.
      * Replaces the depth in a [band] of vertices along the silhouette by averages walked out from inside.
      */
     private fun extendInteriorDepth(values: FloatArray, topology: Topology, grid: Grid, band: Int) {

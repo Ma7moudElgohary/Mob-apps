@@ -5,7 +5,7 @@ import com.ma7moud.reality3d.ai.AiCoreAnalyzer
 import com.ma7moud.reality3d.ar.ArCoreScanFactory
 import com.ma7moud.reality3d.ai.ObjectAi
 import com.ma7moud.reality3d.depth.DepthEngine
-import com.ma7moud.reality3d.depth.MidasDepthEngine
+import com.ma7moud.reality3d.depth.DepthAnythingEngine
 import com.ma7moud.reality3d.scan.ScanEngineFactory
 import com.ma7moud.reality3d.segmentation.MlKitSubjectMasker
 import com.ma7moud.reality3d.segmentation.SubjectSegmenterEngine
@@ -30,5 +30,5 @@ open class Reality3DApplication : Application() {
     val services: Services by lazy { createServices() }
 
     protected open fun createServices(): Services =
-        Services(MidasDepthEngine(this), MlKitSubjectMasker(this), AiCoreAnalyzer(appScope), ArCoreScanFactory())
+        Services(DepthAnythingEngine(this), MlKitSubjectMasker(this), AiCoreAnalyzer(appScope), ArCoreScanFactory())
 }

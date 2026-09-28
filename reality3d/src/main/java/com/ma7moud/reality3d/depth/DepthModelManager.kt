@@ -12,7 +12,7 @@ import java.net.URL
 import java.security.MessageDigest
 
 /**
- * Downloads the MiDaS depth model once. The download resumes after an interruption and is checked
+ * Downloads the Depth Anything V2 model once. The download resumes after an interruption and is checked
  * against a SHA-256, and the model lives in no-backup storage so it never fills the user's backup quota.
  */
 class DepthModelManager(context: Context) {
@@ -22,10 +22,11 @@ class DepthModelManager(context: Context) {
     private val partFile = File(directory, "$MODEL_FILE_NAME.part")
 
     init {
-        // Versions before 0.3 kept the model in filesDir, which Android backs up.
-        val legacy = File(context.filesDir, MODEL_FILE_NAME)
-        if (legacy.exists() && (isReady() || legacy.length() != MODEL_BYTES || !legacy.renameTo(modelFile))) legacy.delete()
-        File(context.filesDir, "$MODEL_FILE_NAME.part").delete()
+        // Earlier versions used MiDaS (34 MB), kept at first in filesDir and later in no-backup storage.
+        for (dir in listOf(context.filesDir, directory)) {
+            File(dir, LEGACY_FILE_NAME).delete()
+            File(dir, "$LEGACY_FILE_NAME.part").delete()
+        }
     }
 
     fun isReady(): Boolean = modelFile.length() == MODEL_BYTES
@@ -100,13 +101,15 @@ class DepthModelManager(context: Context) {
     }
 
     companion object {
-        const val MODEL_BYTES = 33_507_904L
-        private const val MODEL_FILE_NAME = "midas_small_256_fp16.tflite"
-        private const val MODEL_SHA256 = "bec9bce704789e504ec306196fcb0aabe90fd25c2b9d7db382339741950890ca"
+        const val MODEL_BYTES = 27_733_680L
+        const val MODEL_SHA256 = "f74509422e4a9270a354b249a9193abdd4903354be63701262238a7f4b869611"
+        private const val MODEL_FILE_NAME = "depth_anything_v2_small_wi8_afp32.tflite"
+        private const val LEGACY_FILE_NAME = "midas_small_256_fp16.tflite"
 
-        // Pinned to one revision of litert-community/MiDaS-small so the checksum always matches.
-        private const val MODEL_URL = "https://huggingface.co/litert-community/MiDaS-small/resolve/" +
-            "60029dd423757afaed8f7a38fb4042b105ca1f6e/midas_small_256_fp16.tflite"
+        // Depth Anything V2 Small (Apache-2.0) with int8 weights, pinned to one revision of
+        // litert-community/depth-anything-v2-small so the checksum always matches.
+        private const val MODEL_URL = "https://huggingface.co/litert-community/depth-anything-v2-small/resolve/" +
+            "178427e448dbf4da93b1e7b1b2abc103ad329bd6/tflite/depth_anything_v2_small_wi8_afp32.tflite"
         private const val PROGRESS_STEP_BYTES = 256 * 1024
     }
 }

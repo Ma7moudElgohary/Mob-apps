@@ -45,6 +45,8 @@ data class UiState(
     val isError: Boolean = false,
     val depthModelReady: Boolean = false,
     val depthDownloadBytes: Long = 0,
+    /** Which hardware runs the depth model and how fast, once measured. */
+    val depthBackend: String? = null,
     val insight: ObjectInsight? = null,
     val analyzing: Boolean = false,
     val rebuilding: Boolean = false,
@@ -57,7 +59,11 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     val aiState: StateFlow<AiState> = services.ai.state
 
     private val _state = MutableStateFlow(
-        UiState(depthModelReady = services.depth.isModelReady, depthDownloadBytes = services.depth.downloadBytes),
+        UiState(
+            depthModelReady = services.depth.isModelReady,
+            depthDownloadBytes = services.depth.downloadBytes,
+            depthBackend = services.depth.backendSummary,
+        ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -125,7 +131,10 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                     null
                 }
                 report("Estimating depth…", null)
-                val source = Inputs(photo, services.depth.estimate(photo), mask)
+                // With a subject the depth model looks at it and its surroundings at full resolution.
+                val focus = mask?.takeIf { it.coverage > 0.001f }?.bounds()
+                val source = Inputs(photo, services.depth.estimate(photo, focus), mask)
+                _state.update { it.copy(depthBackend = services.depth.backendSummary) }
                 inputs = source
                 report("Building the 3D model…", null)
                 val settings = _state.value.settings

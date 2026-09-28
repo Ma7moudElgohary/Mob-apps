@@ -12,7 +12,7 @@ data class MeshSettings(
     val profile: ShapeProfile = ShapeProfile.ROUND,
     /** Front-to-back thickness as a fraction of the subject's local width (1 = as thick as it is wide). */
     val thickness: Float = DEFAULT_THICKNESS,
-    /** How strongly the MiDaS depth bends and details the model (0 = silhouette only). */
+    /** How strongly the estimated depth bends and details the model (0 = silhouette only). */
     val depthStrength: Float = 1f,
     val detail: MeshDetail = MeshDetail.STANDARD,
 ) {

@@ -19,7 +19,7 @@ android {
         versionCode = buildNumber
         versionName = "0.4.$buildNumber"
 
-        // Phones that run Gemini Nano are all 64-bit ARM; dropping the other ABIs of LiteRT saves about 11 MB.
+        // Phones that run Gemini Nano are all 64-bit ARM; dropping the other ABIs of LiteRT saves several MB.
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -72,7 +72,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.mlkit.genai.prompt)
     implementation(libs.mlkit.subject.segmentation)
-    implementation(libs.tensorflow.lite)
+    implementation(libs.litert)
     implementation(libs.arcore)
     debugImplementation(libs.androidx.compose.ui.tooling)
 

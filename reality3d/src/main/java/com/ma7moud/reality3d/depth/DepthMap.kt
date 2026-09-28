@@ -2,18 +2,37 @@ package com.ma7moud.reality3d.depth
 
 import kotlin.math.floor
 
-/** Relative inverse depth from MiDaS (bigger = closer), row-major with the origin at the photo's top-left. */
-class DepthMap(val width: Int, val height: Int, val values: FloatArray) {
+/**
+ * Relative inverse depth (bigger = closer), row-major with the origin at the top-left.
+ *
+ * The map may cover only part of the photo: [left], [top], [right] and [bottom] give that region in
+ * normalised photo coordinates (0..1). Samples outside it repeat the region's edge.
+ */
+class DepthMap(
+    val width: Int,
+    val height: Int,
+    val values: FloatArray,
+    val left: Float = 0f,
+    val top: Float = 0f,
+    val right: Float = 1f,
+    val bottom: Float = 1f,
+) {
     init {
         require(width > 0 && height > 0 && values.size == width * height) { "Depth map size mismatch" }
+        require(right > left && bottom > top) { "Depth map region is empty" }
     }
 
     operator fun get(x: Int, y: Int): Float = values[y * width + x]
 
-    /** Bilinear sample at normalised photo coordinates (0..1 on both axes). */
-    fun sample(u: Float, v: Float): Float = bilinear(values, width, height, u, v)
+    /** Depth pixels across the whole photo, for turning a blur in depth pixels into photo units. */
+    val photoWidth: Float get() = width / (right - left)
+    val photoHeight: Float get() = height / (bottom - top)
 
-    /** Spread of the whole photo's depth between the 2nd and 98th percentiles. */
+    /** Bilinear sample at normalised photo coordinates (0..1 on both axes). */
+    fun sample(u: Float, v: Float): Float =
+        bilinear(values, width, height, (u - left) / (right - left), (v - top) / (bottom - top))
+
+    /** Spread of the map's depth between the 2nd and 98th percentiles. */
     val robustRange: Float by lazy {
         val sorted = values.copyOf().also { it.sort() }
         sorted[(sorted.size - 1) * 98 / 100] - sorted[(sorted.size - 1) * 2 / 100]

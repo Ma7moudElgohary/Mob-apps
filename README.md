@@ -35,10 +35,13 @@ and runs without it.
 1. Take a photo or pick one from the gallery (large photos are decoded straight at 1600 px).
 2. ML Kit subject segmentation cuts the object out. Its model comes from Google Play services; the
    app asks for it at install time and shows its download on first use.
-3. MiDaS v2.1 small (LiteRT, 34 MB, downloaded once, resumable and checked with SHA-256) estimates depth.
+3. Depth Anything V2 Small (LiteRT, 28 MB with int8 weights, downloaded once, resumable and checked with SHA-256)
+   estimates depth. The photo is cropped around the subject and fitted into the model's 686 × 518 input without
+   stretching. On first use the app times the CPU, the GPU (fp32) and the NPU where there is one, keeps the fastest
+   backend whose output matches the CPU's, and falls back to the CPU if an accelerator ever fails.
 4. The mesh builder turns the outline and the depth into a textured triangle mesh:
    - the silhouette is **inflated** (a Poisson solve), so every part gets a rounded thickness that matches its width;
-   - the MiDaS depth, normalised inside the subject, tilts and bends the model and adds relief;
+   - the depth, normalised inside the subject, tilts and bends the model and adds relief;
    - in **Solid** mode a mirrored back is joined to the front along the outline, so the model is closed
      (watertight) and can be 3D printed. **Relief** mode keeps the front surface only.
 5. Shape controls rebuild the model instantly: Solid/Relief, Round/Boxy, thickness, depth strength and detail.
