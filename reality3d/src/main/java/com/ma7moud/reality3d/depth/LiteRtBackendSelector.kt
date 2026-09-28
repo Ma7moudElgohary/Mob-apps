@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.SystemClock
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
-import com.google.ai.edge.litert.GpuOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -33,31 +32,42 @@ class LiteRtBackendSelector(context: Context) {
         prefs.edit().putString(KEY_BACKEND, backend.name).apply()
     }
 
-    suspend fun benchmark(modelFile: File, input: FloatArray): List<BackendBenchmark> = withContext(Dispatchers.Default) {
-        val results = listOf(InferenceBackend.GPU, InferenceBackend.NPU, InferenceBackend.CPU).map { backend ->
-            runCatching {
-                CompiledModel.create(modelFile.absolutePath, optionsFor(backend)).use { model ->
-                    val warmInputs = model.createInputBuffers()
-                    warmInputs[0].writeFloat(input)
-                    model.run(warmInputs)
+    suspend fun benchmark(modelFile: File, input: FloatArray): List<BackendBenchmark> =
+        withContext(Dispatchers.Default) {
+            val results = listOf(
+                InferenceBackend.GPU,
+                InferenceBackend.NPU,
+                InferenceBackend.CPU,
+            ).map { backend ->
+                runCatching {
+                    CompiledModel.create(modelFile.absolutePath, optionsFor(backend)).use { model ->
+                        val warmInputs = model.createInputBuffers()
+                        warmInputs[0].writeFloat(input)
+                        model.run(warmInputs)
 
-                    val timedInputs = model.createInputBuffers()
-                    timedInputs[0].writeFloat(input)
-                    val start = SystemClock.elapsedRealtimeNanos()
-                    val outputs = model.run(timedInputs)
-                    outputs[0].readFloat()
-                    val elapsedMs = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L
-                    BackendBenchmark(backend, elapsedMs)
+                        val timedInputs = model.createInputBuffers()
+                        timedInputs[0].writeFloat(input)
+                        val start = SystemClock.elapsedRealtimeNanos()
+                        val outputs = model.run(timedInputs)
+                        outputs[0].readFloat()
+                        val elapsedMs = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000L
+                        BackendBenchmark(backend, elapsedMs)
+                    }
+                }.getOrElse {
+                    BackendBenchmark(backend, null, it.message ?: it.javaClass.simpleName)
                 }
-            }.getOrElse { BackendBenchmark(backend, null, it.message ?: it.javaClass.simpleName) }
+            }
+            results.filter { it.succeeded }
+                .minByOrNull { it.milliseconds ?: Long.MAX_VALUE }
+                ?.let { savePreferred(it.backend) }
+            results
         }
-        results.filter { it.succeeded }
-            .minByOrNull { it.milliseconds ?: Long.MAX_VALUE }
-            ?.let { savePreferred(it.backend) }
-        results
-    }
 
-    fun infer(modelFile: File, input: FloatArray, requested: InferenceBackend? = null): Pair<FloatArray, InferenceBackend> {
+    fun infer(
+        modelFile: File,
+        input: FloatArray,
+        requested: InferenceBackend? = null,
+    ): Pair<FloatArray, InferenceBackend> {
         val order = buildList {
             requested?.let(::add)
             preferred()?.takeIf { it !in this }?.let(::add)
@@ -80,15 +90,18 @@ class LiteRtBackendSelector(context: Context) {
                 lastError = error
             }
         }
-        throw IllegalStateException("No LiteRT accelerator could execute Depth Anything V2", lastError)
+        throw IllegalStateException(
+            "No LiteRT accelerator could execute Depth Anything V2",
+            lastError,
+        )
     }
 
     private fun optionsFor(backend: InferenceBackend): CompiledModel.Options =
         CompiledModel.Options(backend.accelerator).apply {
             if (backend == InferenceBackend.GPU) {
-                // Depth Anything V2's validated LiteRT GPU path requires FP32 compute.
-                // Default reduced precision can return severely incorrect relative depth.
-                gpuOptions = GpuOptions(precision = GpuOptions.Precision.FP32)
+                gpuOptions = CompiledModel.GpuOptions(
+                    precision = CompiledModel.GpuOptions.Precision.FP32,
+                )
             }
         }
 
