@@ -862,10 +862,11 @@ private fun AboutCard() {
         shape = RoundedCornerShape(16.dp),
     ) {
         Text(
-            "How it works: the 360° scan fuses ARCore's depth maps into one closed surface and colours it from the " +
-                "photos taken on the way round. From a single photo, ML Kit cuts the subject out, Depth Anything V2 estimates its " +
-                "depth and the outline is inflated into a rounded shape; one photo cannot show the back, so Solid mode " +
-                "mirrors the front. Everything runs on the phone.",
+            "How it works: the 360° scan fuses ARCore's raw depth, weighted by its confidence, into one closed surface " +
+                "and colours it from the photos taken on the way round. From a single photo, ML Kit cuts the objects out, " +
+                "Depth Anything V2 estimates their depth and the outline is inflated into a rounded shape; one photo cannot " +
+                "show the back, so Solid mode mirrors the front, or an image-to-3D AI on your own computer makes the whole " +
+                "object. Everything else runs on the phone.",
             Modifier.padding(14.dp),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

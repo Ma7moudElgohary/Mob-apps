@@ -17,7 +17,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.4.$buildNumber"
+        versionName = "0.5.$buildNumber"
 
         // Phones that run Gemini Nano are all 64-bit ARM; dropping the other ABIs of LiteRT saves several MB.
         ndk {

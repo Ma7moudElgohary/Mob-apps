@@ -1,7 +1,9 @@
 name: Reality3D build
 
+# Branches are built through their pull request, so a push to one doesn't use the Actions minutes twice.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

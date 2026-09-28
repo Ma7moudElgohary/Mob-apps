@@ -4,67 +4,70 @@ Native Android experiments built with Kotlin, Jetpack Compose, on-device AI and 
 
 ## Reality3D
 
-`reality3d/` makes 3D models of real objects, entirely on the phone. It has two modes.
+`reality3d/` makes 3D models of real objects on the phone: by walking around them with ARCore, from a
+single photo, or from a photo sent to an image-to-3D AI on your own computer. Models can be measured,
+compared with the photo, saved to **My models**, seen at real size in the room with AR, and exported as
+GLB, STL, OBJ, PLY or a game-ready Unreal pack.
 
 ### 360° scan (ARCore)
 
-Walk around the object and get a closed, coloured model at its real size:
-
-1. Point the camera at the table until ARCore finds it, then tap the object. A box appears around it;
-   set its size (15 cm to 1.2 m) and start.
-2. Walk slowly around the object in three rings: at its height, from 45° above, from high above, and
-   finish with a view from straight above. A coverage radar and dots floating around the object show
-   which directions are done; photos are only taken while the phone is steady.
-3. About four times a second, ARCore's depth map is fused into a truncated signed distance field over the
-   box (3.5 mm voxels for small objects). Depth that lands on the table only clears the space in front of
-   it, so the table never becomes part of the model but still shows what is empty under and around the object.
-4. Building turns the field into one closed, manifold surface (marching tetrahedra, with unseen space under
-   the object filled as solid), keeps the object's pieces, drops its base onto the table, smooths it and
-   colours each vertex from the best photos that see it.
-5. The result shows the model with its size in centimetres and exports **GLB** (vertex colours, meters),
-   **STL** (millimetres), **OBJ** (vertex colours, meters) or **Photos**: a zip of the scan photos with their
-   camera positions (JSON in ARCore's convention and COLMAP text files) for photogrammetry on a computer.
-
-On phones without a depth sensor, expect about 1 to 2 cm of accuracy on real objects: good for
-dimensions, printing and visualisation. Plain, shiny or transparent surfaces are hard for ARCore depth.
-A newspaper under the object and soft, even light help tracking. ARCore is optional; the app installs
-and runs without it.
+1. Point the camera at the table until ARCore finds it, then tap the object. A box appears around it; set its
+   size (15 cm to 1.2 m) and start.
+2. Walk around the object in three rings (at its height, from 45° above, from high above) and finish from straight
+   above. A **coach** gives one instruction at a time: tracking problems, "Too fast", "Too close" / "Come closer",
+   "Low detail here", which ring to do and "Move left/right" towards the nearest gap, "Top view missing", and
+   "Scan complete" at 85% coverage. A radar and dots around the object show what is covered.
+3. About four times a second ARCore's **raw depth** is fused into a truncated signed distance field over the box
+   (3.5 mm voxels for small objects), each pixel weighted by ARCore's **confidence** (smoothed depth is the fallback
+   until raw depth arrives). An ARCore **anchor** at the box follows ARCore's corrections to its map, so the volume
+   doesn't smear when ARCore adjusts its idea of the room. Depth that lands on the table only clears space.
+4. Building gives one closed, manifold surface, coloured per vertex from the best photos, at its real size, with a
+   **quality score** (coverage, photos, depth maps and confidence) that says what held the scan back. **Add more
+   views** goes back to the camera with everything captured so far.
 
 ### From one photo
 
-1. Take a photo or pick one from the gallery (large photos are decoded straight at 1600 px).
-2. ML Kit subject segmentation cuts the object out. Its model comes from Google Play services; the
-   app asks for it at install time and shows its download on first use.
-3. Depth Anything V2 Small (LiteRT, 28 MB with int8 weights, downloaded once, resumable and checked with SHA-256)
-   estimates depth. The photo is cropped around the subject and fitted into the model's 686 × 518 input without
-   stretching. On first use the app times the CPU, the GPU (fp32) and the NPU where there is one, keeps the fastest
-   backend whose output matches the CPU's, and falls back to the CPU if an accelerator ever fails.
-4. The mesh builder turns the outline and the depth into a textured triangle mesh:
-   - the silhouette is **inflated** (a Poisson solve), so every part gets a rounded thickness that matches its width;
-   - the depth, normalised inside the subject, tilts and bends the model and adds relief;
-   - in **Solid** mode a mirrored back is joined to the front along the outline, so the model is closed
-     (watertight) and can be 3D printed. **Relief** mode keeps the front surface only.
-5. Shape controls rebuild the model instantly: Solid/Relief, Round/Boxy, thickness, depth strength and detail.
-6. Optional: Gemini Nano (ML Kit GenAI Prompt API over Android AICore) recognises the object and sets the
-   shape and thickness for it.
-7. Export and share or save:
-   - **GLB**: one file with the photo texture (Windows 3D Viewer, Blender, online glTF viewers);
-   - **STL**: for 3D printing, 10 cm on the longest side, standing on the build plate;
-   - **OBJ**: OBJ + MTL + JPG in a zip for Blender, SketchUp or Unreal.
+1. Take or pick a photo. ML Kit subject segmentation finds every object: the photo card dims what is left out, and
+   a **tap chooses the object** to model (later taps add or remove others). **Edit outline** paints the outline by
+   hand: Add and Erase brushes with undo, two-finger zoom, **Snap to edges** (a guided filter against the photo) and
+   **Soften edge**. A **photo quality** score rates sharpness, light, framing and separation before anything is made.
+2. **Depth Anything V2** Small (LiteRT, 28 MB int8, downloaded once and checked with SHA-256) estimates depth on the
+   fastest of CPU, GPU and NPU whose result matches the CPU's. The depth is cleaned edge-aware against the photo.
+3. The outline is **inflated** into a rounded shape, bent by the depth. **Solid** mirrors the front into a closed,
+   printable model; **Relief** keeps the front, cut out along the outline with the texture's alpha. Standard detail
+   spends its triangles where the surface bends (a quadric-error simplifier).
+4. **Gemini Nano** (AICore, on the phone) acts as a reconstruction advisor. It answers in strict JSON: the object,
+   its shape and thickness, and whether it is shiny, see-through, has thin parts or holes. It also says whether the
+   360° scan would do better and gives capture tips, and it sets the shape to match.
+5. **AI Full 3D on your computer**: a photo can't show the back, so the cut-out can go to
+   [`reality3d-server`](reality3d-server/) on a computer with a GPU (Stable Fast 3D, TripoSR or Hunyuan3D-2),
+   which returns a complete textured model. Plain http is only used for addresses on the local network.
 
-A single photo cannot show the back of an object, so Solid mode assumes it mirrors the front.
+### Viewer, measuring and AR
 
-Both modes share an OpenGL ES 3 viewer: drag to orbit, pinch to zoom, double-tap to reset, or switch to
-clay to judge the geometry.
+- Looks: photo or scan colours, clay, wireframe, normals, depth; front/back/left/right/top views, auto-rotate,
+  two-finger pan, a light-direction slider, studio or environment lighting, and PNG screenshots.
+- **Measure** by tapping two points on the model; for photo models, **Set real length** turns a known length into
+  the model's scale, which every export follows. **Compare with photo** lines the photo up with an orthographic
+  front view under a draggable divider.
+- **View in AR** stands the model on a real table or floor at its real size: drag to turn, pinch to resize, with a
+  soft shadow and brightness that follows the room.
+- **My models** keeps models on the phone (mesh, texture, photo, thumbnail and quality) to reopen, rename, measure,
+  export or delete later.
+
+### Exports
+
+**GLB** (textured or vertex colours, meters), **STL** (millimetres), **OBJ** (zip with MTL and texture), **PLY**
+(binary, points with colour and normal plus triangles), **Unreal** (three levels of detail, a convex collision hull
+and import notes) and, for scans, **Photos** (the scan photos with camera poses for photogrammetry).
 
 ### Tests
 
-Unit tests cover the mesh builder (including watertightness on random shapes), the exporters, the
-Gemini Nano answer parser, coverage tracking, the photo-set export and the scan reconstruction: a
-synthetic scan of a ball and a block, rendered as ARCore depth maps from rings of camera poses, must fuse
-into a closed surface within 1 mm on average (with and without depth noise), keep round objects' shape
-down to the table and take its colours from the photos. Robolectric tests run both screens end to end
-with fake engines.
+115 JVM tests cover the mesh builder and simplifier, depth input and refinement, exporters and the GLB reader,
+segmentation and the mask editor, the viewer's picking and framing, the Gemini Nano parser, scan fusion (synthetic
+scans must fuse into a closed surface within about 1 mm, also from sparse raw depth with outliers), the scan coach
+and quality, photo quality, saved projects, the server client, and Robolectric runs of every screen with fake
+engines. The server has its own pytest suite; CI runs both.
 
 ## Neon Drift
 
@@ -72,5 +75,5 @@ with fake engines.
 
 ## CI
 
-Every push and pull request builds, tests and lints Reality3D. Main-branch builds publish `Reality3D.apk`
-to the `latest-build` GitHub Release.
+Every pull request and every push to main builds, tests and lints Reality3D and tests the server. Main-branch
+builds publish `Reality3D.apk` to the `latest-build` GitHub Release.
