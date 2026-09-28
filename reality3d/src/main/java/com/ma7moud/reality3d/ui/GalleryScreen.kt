@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
+import com.ma7moud.reality3d.preview.PreviewModel
 import com.ma7moud.reality3d.project.Project
 import com.ma7moud.reality3d.project.ProjectInfo
 import com.ma7moud.reality3d.project.ProjectKind
@@ -146,7 +148,13 @@ internal fun GalleryScreen(viewModel: ProjectsViewModel, onOpen: (String) -> Uni
 
 /** One saved model: the viewer, its details and exports. */
 @Composable
-internal fun ProjectScreen(viewModel: ProjectsViewModel, projectId: String, useGlViewer: Boolean, onBack: () -> Unit) {
+internal fun ProjectScreen(
+    viewModel: ProjectsViewModel,
+    projectId: String,
+    useGlViewer: Boolean,
+    onViewInAr: (PreviewModel) -> Unit,
+    onBack: () -> Unit,
+) {
     val project by viewModel.current.collectAsStateWithLifecycle()
     val loading by viewModel.loading.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
@@ -189,7 +197,7 @@ internal fun ProjectScreen(viewModel: ProjectsViewModel, projectId: String, useG
         if (open == null) {
             if (loading) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
         } else {
-            OpenProject(open, useGlViewer, viewModel, actions, exporting, onDelete = { deleting = true })
+            OpenProject(open, useGlViewer, viewModel, actions, exporting, onViewInAr, onDelete = { deleting = true })
         }
         Spacer(Modifier.height(8.dp))
     }
@@ -215,6 +223,7 @@ private fun OpenProject(
     viewModel: ProjectsViewModel,
     actions: ExportActions,
     exporting: Boolean,
+    onViewInAr: (PreviewModel) -> Unit,
     onDelete: () -> Unit,
 ) {
     val info = open.info
@@ -229,7 +238,10 @@ private fun OpenProject(
             onSetRealLength = if (info.kind == ProjectKind.PHOTO) viewModel::setRealLength else null,
             onScreenshot = actions.shareScreenshot,
         )
-        Text(summary(info), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(summary(info), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+            FilledTonalButton(onClick = { onViewInAr(PreviewModel(open.mesh, open.texture, open.metersPerUnit, info.name)) }) { Text("View in AR") }
+        }
         info.quality?.let { report ->
             QualityCard(
                 title = if (info.kind == ProjectKind.SCAN) "Scan quality" else "Photo quality",

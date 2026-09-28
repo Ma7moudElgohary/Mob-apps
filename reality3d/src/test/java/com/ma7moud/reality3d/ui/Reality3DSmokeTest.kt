@@ -1,8 +1,13 @@
 package com.ma7moud.reality3d.ui
 
+import android.Manifest
+import android.app.Activity
+import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Looper
+import android.view.View
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -21,6 +26,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ma7moud.reality3d.MainActivity
 import com.ma7moud.reality3d.Reality3DApplication
@@ -33,6 +39,11 @@ import com.ma7moud.reality3d.ai.ShapeHint
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.export.ExportFormat
+import com.ma7moud.reality3d.preview.ArPreview
+import com.ma7moud.reality3d.preview.ArPreviewFactory
+import com.ma7moud.reality3d.preview.ArPreviewStatus
+import com.ma7moud.reality3d.preview.PreviewModel
+import com.ma7moud.reality3d.scan.ScanSupport
 import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.Subject
 import com.ma7moud.reality3d.segmentation.SubjectMask
@@ -57,7 +68,7 @@ import kotlin.math.hypot
 
 /** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
 class TestReality3DApplication : Reality3DApplication() {
-    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), useGlViewer = false)
+    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), FakeArPreview, useGlViewer = false)
 }
 
 /**
@@ -96,6 +107,40 @@ private class FakeSegmenter : SubjectSegmenterEngine {
         return Subject(left, top, width, height, FloatArray(width * height) { i ->
             if (hypot(left + i % width - cx, top + i / width - cy) < r) 1f else 0f
         })
+    }
+}
+
+/** Stands in for ARCore's AR view: always available, placed as soon as it resumes. */
+internal object FakeArPreview : ArPreviewFactory {
+    var last: Preview? = null
+
+    override fun check(activity: Activity, userRequestedInstall: Boolean) = ScanSupport.Ready
+
+    override fun create(context: Context, model: PreviewModel): ArPreview = Preview(context, model).also { last = it }
+
+    class Preview(context: Context, val model: PreviewModel) : ArPreview {
+        private val _status = MutableStateFlow(ArPreviewStatus())
+        override val status: StateFlow<ArPreviewStatus> = _status
+        override val view: View = View(context)
+        var closed = false
+
+        override fun resume() {
+            _status.value = ArPreviewStatus(phase = ArPreviewStatus.Phase.PLACED, scale = 2f)
+        }
+
+        override fun pause() = Unit
+
+        override fun resetScale() {
+            _status.value = _status.value.copy(scale = 1f)
+        }
+
+        override fun placeAgain() {
+            _status.value = _status.value.copy(phase = ArPreviewStatus.Phase.READY_TO_PLACE)
+        }
+
+        override fun close() {
+            closed = true
+        }
     }
 }
 
@@ -228,6 +273,21 @@ class Reality3DSmokeTest {
         @Suppress("DEPRECATION")
         val send = shadowOf(compose.activity).nextStartedActivity.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
         assertEquals("model/gltf-binary", send!!.type)
+
+        // The saved model stands in the room at its real size.
+        shadowOf(ApplicationProvider.getApplicationContext<Application>()).grantPermissions(Manifest.permission.CAMERA)
+        compose.onNodeWithText("View in AR").performScrollTo().performClick()
+        waitForText("Drag to turn it, pinch to resize it, tap elsewhere to move it.")
+        val ar = FakeArPreview.last!!
+        assertEquals(name, ar.model.name)
+        compose.onNodeWithText("2.0× real size", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Real size").performClick()
+        compose.onNodeWithText("Real size · ", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Place again").performClick()
+        waitForText("Tap where the model should stand.")
+        compose.onNodeWithText("Close").performClick()
+        waitForText("Rename")
+        assertTrue(ar.closed)
 
         compose.onNodeWithText("Rename").performScrollTo().performClick()
         compose.onNode(hasSetTextAction() and hasText(name)).performTextReplacement("Kitchen mug")

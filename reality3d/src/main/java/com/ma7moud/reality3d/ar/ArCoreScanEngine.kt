@@ -65,28 +65,32 @@ import kotlin.math.sqrt
 
 class ArCoreScanFactory : ScanEngineFactory {
 
-    override fun check(activity: Activity, userRequestedInstall: Boolean): ScanSupport {
+    override fun check(activity: Activity, userRequestedInstall: Boolean): ScanSupport =
+        ArCoreSupport.check(activity, userRequestedInstall, "the 360° scan")
+
+    override fun create(context: Context): ScanEngine = ArCoreScanEngine(context.applicationContext)
+}
+
+/** Whether ARCore can run, asking the Play Store to install or update it when the user asked to. */
+internal object ArCoreSupport {
+
+    fun check(activity: Activity, userRequestedInstall: Boolean, feature: String): ScanSupport {
+        val unsupported = "This phone doesn't support ARCore, which $feature needs."
         val availability = ArCoreApk.getInstance().checkAvailability(activity)
         if (availability.isTransient) return ScanSupport.Checking
-        if (availability.isUnsupported) return ScanSupport.Unsupported(UNSUPPORTED)
+        if (availability.isUnsupported) return ScanSupport.Unsupported(unsupported)
         return try {
             when (ArCoreApk.getInstance().requestInstall(activity, userRequestedInstall)) {
                 ArCoreApk.InstallStatus.INSTALLED -> ScanSupport.Ready
                 else -> ScanSupport.Installing
             }
         } catch (e: UnavailableUserDeclinedInstallationException) {
-            ScanSupport.Unsupported("Scanning needs Google Play Services for AR. Install it from the Play Store to use this.")
+            ScanSupport.Unsupported("This needs Google Play Services for AR. Install it from the Play Store to use it.")
         } catch (e: UnavailableDeviceNotCompatibleException) {
-            ScanSupport.Unsupported(UNSUPPORTED)
+            ScanSupport.Unsupported(unsupported)
         } catch (e: Exception) {
             ScanSupport.Unsupported("ARCore isn't working right now (${e.message ?: e.javaClass.simpleName}).")
         }
-    }
-
-    override fun create(context: Context): ScanEngine = ArCoreScanEngine(context.applicationContext)
-
-    private companion object {
-        const val UNSUPPORTED = "This phone doesn't support ARCore, which the 360° scan needs."
     }
 }
 

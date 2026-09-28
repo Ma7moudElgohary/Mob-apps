@@ -748,6 +748,8 @@ uniform int uEnvironment;
 uniform vec3 uLightDir;
 uniform vec3 uCamera;
 uniform vec2 uDepthRange;
+// How much darker the room's light makes the model in AR; 0 (unset) leaves it as lit.
+uniform float uShade;
 out vec4 fragColor;
 
 // A studio sky: warm ground, grey horizon, blue zenith. The model's +y is up.
@@ -808,7 +810,7 @@ void main() {
         float rim = pow(1.0 - max(dot(n, toEye), 0.0), 3.0) * 0.12;
         color = base * light + vec3(specular + rim);
     }
-    fragColor = vec4(color, 1.0);
+    fragColor = vec4(color * (1.0 - uShade), 1.0);
 }
 """
 

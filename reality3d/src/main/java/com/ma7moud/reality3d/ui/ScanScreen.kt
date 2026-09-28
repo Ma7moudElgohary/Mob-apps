@@ -34,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -66,6 +67,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
+import com.ma7moud.reality3d.preview.PreviewModel
 import com.ma7moud.reality3d.quality.QualityReport
 import com.ma7moud.reality3d.scan.CoachTip
 import com.ma7moud.reality3d.scan.CoverageTracker
@@ -88,7 +90,7 @@ private val Warning = Color(0xFFFFC857)
 
 /** The 360° scan: camera permission and ARCore checks, guided capture, then the finished model. */
 @Composable
-fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Unit) {
+fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Unit, onViewInAr: (PreviewModel) -> Unit = {}) {
     val screen by viewModel.screen.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
@@ -129,6 +131,7 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
                 viewModel,
                 useGlViewer,
                 onAddViews = viewModel::addMoreViews,
+                onViewInAr = { onViewInAr(PreviewModel(state.capture.mesh, null, 1f, "Your scan")) },
                 onScanAgain = { retry() },
                 onDone = { close() },
             )
@@ -349,6 +352,7 @@ private fun ScanResult(
     viewModel: ScanViewModel,
     useGlViewer: Boolean,
     onAddViews: () -> Unit,
+    onViewInAr: () -> Unit,
     onScanAgain: () -> Unit,
     onDone: () -> Unit,
 ) {
@@ -444,8 +448,11 @@ private fun ScanResult(
         }
         val saved by viewModel.saved.collectAsStateWithLifecycle()
         QualityCard(capture.quality, onAddViews)
-        OutlinedButton(onClick = viewModel::saveProject, enabled = saved !== capture, modifier = Modifier.fillMaxWidth()) {
-            Text(if (saved === capture) "Saved to My models" else "Save to My models")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(onClick = viewModel::saveProject, enabled = saved !== capture, modifier = Modifier.weight(1f)) {
+                Text(if (saved === capture) "Saved to My models" else "Save to My models")
+            }
+            FilledTonalButton(onClick = onViewInAr) { Text("View in AR") }
         }
         message?.let { (text, isError) ->
             Text(text, color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)

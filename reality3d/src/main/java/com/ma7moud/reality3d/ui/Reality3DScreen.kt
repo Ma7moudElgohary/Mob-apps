@@ -91,6 +91,7 @@ import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.MeshDetail
 import com.ma7moud.reality3d.mesh.MeshSettings
 import com.ma7moud.reality3d.mesh.ShapeProfile
+import com.ma7moud.reality3d.preview.PreviewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -137,22 +138,36 @@ fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
             val editor by viewModel.editor.collectAsStateWithLifecycle()
             val session = editor
             val openId = projectId
+            var arModel by remember { mutableStateOf<PreviewModel?>(null) }
+            val inAr = arModel
             fun open(id: String) {
                 projectId = id
                 destination = Destination.PROJECT
             }
             when {
-                destination == Destination.SCAN -> ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { destination = Destination.HOME })
+                inAr != null -> ArPreviewScreen(inAr, onClose = { arModel = null })
+                destination == Destination.SCAN -> ScanScreen(
+                    viewModel<ScanViewModel>(),
+                    useGlViewer,
+                    onClose = { destination = Destination.HOME },
+                    onViewInAr = { arModel = it },
+                )
                 session != null -> MaskEditorScreen(
                     session,
                     onCancel = { viewModel.finishEditing(apply = false) },
                     onDone = { viewModel.finishEditing(apply = true) },
                 )
                 destination == Destination.GALLERY -> GalleryScreen(projects, onOpen = ::open, onBack = { destination = Destination.HOME })
-                destination == Destination.PROJECT && openId != null -> ProjectScreen(projects, openId, useGlViewer, onBack = {
-                    projects.close()
-                    destination = Destination.GALLERY
-                })
+                destination == Destination.PROJECT && openId != null -> ProjectScreen(
+                    projects,
+                    openId,
+                    useGlViewer,
+                    onViewInAr = { arModel = it },
+                    onBack = {
+                        projects.close()
+                        destination = Destination.GALLERY
+                    },
+                )
                 else -> Reality3DScreen(
                     viewModel,
                     projects,
@@ -160,6 +175,7 @@ fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
                     onScan = { destination = Destination.SCAN },
                     onGallery = { destination = Destination.GALLERY },
                     onOpenProject = ::open,
+                    onViewInAr = { arModel = it },
                 )
             }
         }
@@ -177,6 +193,7 @@ private fun Reality3DScreen(
     onScan: () -> Unit,
     onGallery: () -> Unit,
     onOpenProject: (String) -> Unit,
+    onViewInAr: (PreviewModel) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val ai by viewModel.aiState.collectAsStateWithLifecycle()
@@ -336,12 +353,20 @@ private fun Reality3DScreen(
                 onScreenshot = { shareScreenshot(it) },
             )
             val saved = state.savedMesh === mesh
-            OutlinedButton(
-                onClick = viewModel::saveProject,
-                enabled = !saved && !state.saving && !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (saved) "Saved to My models" else if (state.saving) "Saving…" else "Save to My models")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = viewModel::saveProject,
+                    enabled = !saved && !state.saving && !busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (saved) "Saved to My models" else if (state.saving) "Saving…" else "Save to My models")
+                }
+                FilledTonalButton(
+                    onClick = {
+                        onViewInAr(PreviewModel(mesh, state.texture ?: photo, viewModel.metersPerUnit(mesh), state.insight?.name ?: "Your model"))
+                    },
+                    enabled = !busy,
+                ) { Text("View in AR") }
             }
             ShapeCard(state.settings, state.rebuilding, viewModel::updateSettings)
         }
