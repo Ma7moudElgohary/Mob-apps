@@ -82,6 +82,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ma7moud.reality3d.ai.AiState
+import com.ma7moud.reality3d.diagnostics.Fallback
 import com.ma7moud.reality3d.ai.CaptureMode
 import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.SurfaceType
@@ -306,6 +307,7 @@ private fun Reality3DScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Header()
+        state.crash?.let { CrashCard(it, onClose = viewModel::dismissCrash) }
         ScanCard(onScan)
         projects?.takeIf { it.isNotEmpty() }?.let { MyModelsRow(it, onOpen = onOpenProject, onSeeAll = onGallery) }
         Text(
@@ -314,7 +316,15 @@ private fun Reality3DScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
         )
-        StatusCard(ai, state.depthModelReady, state.depthDownloadBytes, state.depthBackend, onGetAi = viewModel::downloadAi)
+        StatusCard(
+            ai,
+            state.depthModelReady,
+            state.depthDownloadBytes,
+            state.depthBackend,
+            state.turnedOff,
+            onGetAi = viewModel::downloadAi,
+            onTurnBackOn = viewModel::turnFeaturesBackOn,
+        )
         PhotoCard(
             photo,
             state.subjects,
@@ -475,7 +485,15 @@ private fun ScanCard(onScan: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(ai: AiState, depthReady: Boolean, depthBytes: Long, depthBackend: String?, onGetAi: () -> Unit) {
+private fun StatusCard(
+    ai: AiState,
+    depthReady: Boolean,
+    depthBytes: Long,
+    depthBackend: String?,
+    turnedOff: List<Fallback>,
+    onGetAi: () -> Unit,
+    onTurnBackOn: () -> Unit,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val (aiText, aiColor) = when (ai) {
@@ -499,6 +517,12 @@ private fun StatusCard(ai: AiState, depthReady: Boolean, depthBytes: Long, depth
                 },
                 if (depthReady) Good else Waiting,
             )
+            if (turnedOff.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    StatusLine("Safe mode", turnedOff.joinToString { it.shortName } + " off after a crash", Waiting, Modifier.weight(1f))
+                    TextButton(onClick = onTurnBackOn) { Text("Turn on") }
+                }
+            }
         }
     }
 }

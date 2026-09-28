@@ -3,6 +3,7 @@ package com.ma7moud.reality3d.depth
 import android.content.Context
 import android.graphics.Bitmap
 import androidx.core.graphics.scale
+import com.ma7moud.reality3d.diagnostics.Diagnostics
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,11 +27,11 @@ interface DepthEngine {
 }
 
 /** Depth Anything V2 Small through LiteRT, on the fastest backend that gives the same result as the CPU. */
-class DepthAnythingEngine(context: Context) : DepthEngine {
+class DepthAnythingEngine(context: Context, private val diagnostics: Diagnostics) : DepthEngine {
 
     private val appContext = context.applicationContext
     private val models = DepthModelManager(context)
-    private val runner by lazy { DepthAnythingRunner(appContext, models.modelFile, DepthModelManager.MODEL_SHA256) }
+    private val runner by lazy { DepthAnythingRunner(appContext, models.modelFile, DepthModelManager.MODEL_SHA256, diagnostics) }
 
     override val isModelReady: Boolean get() = models.isReady()
     override val downloadBytes: Long get() = DepthModelManager.MODEL_BYTES

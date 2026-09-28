@@ -86,9 +86,9 @@ class RemoteServerTest {
             runBlocking { client.generate(RemoteSettings(url, token = "nope", engine = "preview"), ByteArray(4)) { _, _ -> } }
         }
         assertEquals("The server wants an access code, or this one is wrong.", wrongCode.message)
-        server.close()
-        val down = assertThrows(RemoteException::class.java) { runBlocking { client.health(RemoteSettings(url)) } }
-        assertTrue(down.message!!.startsWith("Can't reach"))
+        // Nothing listens on port 1. (A server just closed can still take one last connection.)
+        val down = assertThrows(RemoteException::class.java) { runBlocking { client.health(RemoteSettings("127.0.0.1:1")) } }
+        assertTrue(down.message, down.message!!.startsWith("Can't reach http://127.0.0.1:1."))
     }
 
     @Test

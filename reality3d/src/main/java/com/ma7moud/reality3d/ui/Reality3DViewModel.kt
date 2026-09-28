@@ -15,6 +15,8 @@ import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.withInsight
 import com.ma7moud.reality3d.data.ImageLoader
 import com.ma7moud.reality3d.depth.DepthMap
+import com.ma7moud.reality3d.diagnostics.CrashReport
+import com.ma7moud.reality3d.diagnostics.Fallback
 import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
@@ -81,6 +83,10 @@ data class UiState(
     /** The model last saved to My models, to show it is saved. */
     val savedMesh: Mesh3D? = null,
     val remote: RemoteUi = RemoteUi(),
+    /** Why the app closed unexpectedly last time, until the user closes the note. */
+    val crash: CrashReport? = null,
+    /** Features turned off because they crashed the app on this phone. */
+    val turnedOff: List<Fallback> = emptyList(),
 )
 
 /** A full 3D model made by an image-to-3D AI on the user's computer. */
@@ -115,6 +121,7 @@ data class SubjectsView(
 class Reality3DViewModel(application: Application) : AndroidViewModel(application) {
 
     private val services = (application as Reality3DApplication).services
+    private val diagnostics = (application as Reality3DApplication).diagnostics
     val aiState: StateFlow<AiState> = services.ai.state
 
     private val _state = MutableStateFlow(
@@ -122,6 +129,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             depthModelReady = services.depth.isModelReady,
             depthDownloadBytes = services.depth.downloadBytes,
             depthBackend = services.depth.backendSummary,
+            crash = diagnostics.report,
+            turnedOff = diagnostics.turnedOff,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -191,6 +200,10 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                 Log.w(TAG, "Couldn't open photo", e)
                 fail("Couldn't open that photo (${e.readable()}).")
                 return@launch
+            } catch (e: OutOfMemoryError) {
+                Log.w(TAG, "Not enough memory to open the photo", e)
+                fail(OUT_OF_MEMORY_MESSAGE)
+                return@launch
             }
             showPhoto(photo)
             findSubjects(photo)
@@ -235,12 +248,29 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             Log.w(TAG, "Subject segmentation failed", e)
             _state.update { it.copy(progress = null) }
             return null
+        } catch (e: LinkageError) {
+            // Google Play services' ML Kit didn't match the app; carry on without separating the object.
+            Log.w(TAG, "Subject segmentation couldn't start", e)
+            _state.update { it.copy(progress = null) }
+            return null
         }
-        val found = withContext(Dispatchers.Default) { examine(photo, segmentation) }
-        subjects = found
-        publishSubjects(found)
-        _state.update { it.copy(progress = null) }
-        return found
+        // Showing the objects is a help, not a must: if it fails, the photo stays and the model can still be made.
+        return try {
+            val found = withContext(Dispatchers.Default) { examine(photo, segmentation) }
+            subjects = found
+            publishSubjects(found)
+            found
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't show the photo's objects", e)
+            null
+        } catch (e: OutOfMemoryError) {
+            Log.w(TAG, "Not enough memory to show the photo's objects", e)
+            null
+        } finally {
+            _state.update { it.copy(progress = null) }
+        }
     }
 
     private fun examine(photo: Bitmap, segmentation: Segmentation?): PhotoSubjects {
@@ -363,6 +393,12 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) {
                 Log.w(TAG, "3D generation failed", e)
                 fail("3D generation failed: ${e.readable()}.")
+            } catch (e: OutOfMemoryError) {
+                Log.w(TAG, "Not enough memory for the model", e)
+                fail(OUT_OF_MEMORY_MESSAGE)
+            } catch (e: LinkageError) {
+                Log.w(TAG, "The depth model couldn't start", e)
+                fail("The depth model couldn't start on this phone (${e.javaClass.simpleName}).")
             }
         }
     }
@@ -774,6 +810,17 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun dismissCrash() {
+        diagnostics.dismiss()
+        _state.update { it.copy(crash = null) }
+    }
+
+    /** Turns back on the features a crash turned off. */
+    fun turnFeaturesBackOn() {
+        diagnostics.turnAllBackOn()
+        _state.update { it.copy(turnedOff = emptyList(), message = "Every feature is back on.", isError = false) }
+    }
+
     fun showMessage(message: String, isError: Boolean) {
         _state.update { it.copy(message = message, isError = isError) }
     }
@@ -800,6 +847,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         private const val THUMBNAIL = 320
         private const val CUTOUT_SIZE = 1024
         private const val PREVIEW_ENGINE = "preview"
+        private const val OUT_OF_MEMORY_MESSAGE = "The phone ran out of memory for this photo. Close other apps and try again."
         const val NO_SUBJECT_MESSAGE =
             "Couldn't separate the subject from the background, so the whole photo was used. A plain background helps."
 

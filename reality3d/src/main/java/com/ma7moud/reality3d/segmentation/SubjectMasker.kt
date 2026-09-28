@@ -8,9 +8,14 @@ import com.google.android.gms.common.moduleinstall.ModuleInstallRequest
 import com.google.android.gms.common.moduleinstall.ModuleInstallStatusUpdate
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
+import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
+import com.ma7moud.reality3d.diagnostics.Diagnostics
+import com.ma7moud.reality3d.diagnostics.Fallback
+import com.ma7moud.reality3d.diagnostics.Step
 import com.ma7moud.reality3d.util.awaitResult
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -24,10 +29,14 @@ interface SubjectSegmenterEngine {
     suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): Segmentation?
 }
 
-/** ML Kit subject segmentation. Its model comes from Google Play services and is fetched on first use. */
-class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine {
+/**
+ * ML Kit subject segmentation. Its model comes from Google Play services and is fetched on first use. Its native
+ * code runs inside the app, so if it ever crashes the app, [diagnostics] turns off telling objects apart, and
+ * then segmentation itself, on this phone.
+ */
+class MlKitSubjectMasker(private val context: Context, private val diagnostics: Diagnostics) : SubjectSegmenterEngine {
 
-    private val segmenter by lazy {
+    private val objectsSegmenter by lazy {
         SubjectSegmentation.getClient(
             SubjectSegmenterOptions.Builder()
                 .enableForegroundConfidenceMask()
@@ -35,12 +44,21 @@ class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine 
                 .build(),
         )
     }
+    private val foregroundSegmenter by lazy {
+        SubjectSegmentation.getClient(SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build())
+    }
     private val installer by lazy { ModuleInstall.getClient(context) }
 
     override suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): Segmentation? {
-        ensureModel(onProgress)
+        if (diagnostics.isOff(Fallback.NO_SEGMENTATION)) return null
+        val objects = !diagnostics.isOff(Fallback.ONE_OBJECT)
+        val segmenter = if (objects) objectsSegmenter else foregroundSegmenter
+        ensureModel(segmenter, onProgress)
         onProgress("Separating the subject from the background…", null)
-        val result = segmenter.process(InputImage.fromBitmap(photo, 0)).awaitResult()
+        val result = diagnostics.during(if (objects) Step.FIND_OBJECTS else Step.SEPARATE_OBJECT) {
+            // If ML Kit's own thread fails, its task never finishes; carry on without it rather than wait forever.
+            withTimeoutOrNull(PROCESS_TIMEOUT_MS) { segmenter.process(InputImage.fromBitmap(photo, 0)).awaitResult() }
+        } ?: return null
         val foreground = result.foregroundConfidenceMask?.let { buffer ->
             buffer.rewind()
             val count = photo.width * photo.height
@@ -49,6 +67,8 @@ class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine 
             buffer.get(values)
             SubjectMask(photo.width, photo.height, values).takeIf { it.coverage in MIN_COVERAGE..MAX_COVERAGE }
         } ?: return null
+        // Without separate objects, the whole foreground is the one object.
+        if (!objects) return Segmentation(photo.width, photo.height, foreground, listOf(Subject(0, 0, photo.width, photo.height, foreground.confidence)))
         val subjects = result.subjects.mapNotNull { subject ->
             val buffer = subject.confidenceMask ?: return@mapNotNull null
             if (subject.width <= 0 || subject.height <= 0) return@mapNotNull null
@@ -62,7 +82,7 @@ class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine 
         return Segmentation(photo.width, photo.height, foreground, subjects)
     }
 
-    private suspend fun ensureModel(onProgress: (String, Float?) -> Unit) {
+    private suspend fun ensureModel(segmenter: SubjectSegmenter, onProgress: (String, Float?) -> Unit) {
         val available = try {
             installer.areModulesAvailable(segmenter).awaitResult().areModulesAvailable()
         } catch (e: CancellationException) {
@@ -99,6 +119,7 @@ class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine 
 
     private companion object {
         const val DOWNLOAD_LABEL = "Getting Google's subject model (once)…"
+        const val PROCESS_TIMEOUT_MS = 30_000L
         const val MIN_COVERAGE = 0.002f
         const val MAX_COVERAGE = 0.995f
     }

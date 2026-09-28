@@ -6,6 +6,10 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.media.ExifInterface
 import android.os.Looper
 import android.view.View
 import androidx.compose.ui.geometry.Offset
@@ -68,6 +72,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.Duration
@@ -401,5 +407,45 @@ class Reality3DSmokeTest {
         compose.onNodeWithText("Use all").performScrollTo().performClick()
         waitFor { viewModel.state.value.subjects?.selection?.isEmpty() == true && viewModel.state.value.progress == null }
         assertTrue(viewModel.state.value.subjects!!.edited)
+    }
+
+    /**
+     * The way a phone's photo comes in: a large JPEG through a content URI, decoded, turned and scaled for real.
+     * Robolectric can't run ImageDecoder, so this goes through the decoder older phones use.
+     */
+    @Test
+    @Config(sdk = [27])
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun aCameraPhotoOpensUprightAndShowsItsObjects() {
+        val activity = compose.activity
+        // Cameras store portrait photos sideways, with an EXIF note to turn them.
+        val file = File(activity.cacheDir, "camera/capture_test.jpg").apply { parentFile!!.mkdirs() }
+        val sideways = Bitmap.createBitmap(3000, 2250, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(200, 205, 210))
+            Canvas(this).drawCircle(1500f, 1125f, 600f, Paint().apply { color = Color.rgb(40, 60, 120) })
+        }
+        file.outputStream().use { sideways.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        ExifInterface(file.absolutePath).apply {
+            setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_ROTATE_90.toString())
+            saveAttributes()
+        }
+        val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.files", file)
+        val viewModel = ViewModelProvider(activity)[Reality3DViewModel::class.java]
+        compose.runOnUiThread { viewModel.loadPhoto(uri) }
+        waitFor { viewModel.state.value.photo != null && viewModel.state.value.progress == null }
+        assertFalse(viewModel.state.value.message, viewModel.state.value.isError)
+        waitFor { viewModel.state.value.subjects != null }
+
+        val photo = viewModel.state.value.photo!!
+        assertEquals(1200, photo.width)
+        assertEquals(1600, photo.height)
+        assertEquals(2, viewModel.state.value.subjects!!.count)
+        assertNotNull(viewModel.state.value.photoQuality)
+        assertFalse(viewModel.state.value.message, viewModel.state.value.isError)
+        compose.onNodeWithContentDescription("Selected photo").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Photo quality").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Make 3D model").performScrollTo().performClick()
+        waitFor { viewModel.state.value.mesh != null && viewModel.state.value.progress == null }
+        assertFalse(viewModel.state.value.message, viewModel.state.value.isError)
     }
 }

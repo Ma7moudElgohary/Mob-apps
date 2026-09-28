@@ -7,6 +7,7 @@ import com.ma7moud.reality3d.ar.ArCoreScanFactory
 import com.ma7moud.reality3d.ai.ObjectAi
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthAnythingEngine
+import com.ma7moud.reality3d.diagnostics.Diagnostics
 import com.ma7moud.reality3d.preview.ArPreviewFactory
 import com.ma7moud.reality3d.project.ProjectStore
 import com.ma7moud.reality3d.remote.HttpRemoteServer
@@ -39,10 +40,25 @@ open class Reality3DApplication : Application() {
 
     val appScope: CoroutineScope = MainScope()
 
+    /** Why the app last closed unexpectedly, and the features turned off after native crashes. */
+    val diagnostics: Diagnostics by lazy { Diagnostics(this) }
+
     val services: Services by lazy { createServices() }
 
-    protected open fun createServices(): Services =
-        Services(DepthAnythingEngine(this), MlKitSubjectMasker(this), AiCoreAnalyzer(appScope), ArCoreScanFactory(), projectStore(), ArCorePreviewFactory(), HttpRemoteServer())
+    override fun onCreate() {
+        super.onCreate()
+        diagnostics.watchJavaCrashes()
+    }
+
+    protected open fun createServices(): Services = Services(
+        DepthAnythingEngine(this, diagnostics),
+        MlKitSubjectMasker(this, diagnostics),
+        AiCoreAnalyzer(appScope),
+        ArCoreScanFactory(),
+        projectStore(),
+        ArCorePreviewFactory(),
+        HttpRemoteServer(),
+    )
 
     protected fun projectStore() = ProjectStore(File(filesDir, "projects"))
 }

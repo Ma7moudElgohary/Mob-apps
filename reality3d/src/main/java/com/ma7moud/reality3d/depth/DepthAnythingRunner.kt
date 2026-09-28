@@ -8,6 +8,9 @@ import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
 import com.google.ai.edge.litert.TensorBuffer
+import com.ma7moud.reality3d.diagnostics.Diagnostics
+import com.ma7moud.reality3d.diagnostics.Fallback
+import com.ma7moud.reality3d.diagnostics.Step
 import java.io.Closeable
 import java.io.File
 
@@ -28,22 +31,28 @@ class DepthBenchmark(val chosen: DepthBackend, val timings: Map<DepthBackend, Lo
 /**
  * Runs Depth Anything V2 with LiteRT. The first estimate times the CPU, the GPU (forced to fp32, as the
  * model's validation requires) and the NPU when the phone has one, keeps the fastest backend whose output
- * matches the CPU's, and remembers the choice. A backend that fails later falls back to the CPU for good.
+ * matches the CPU's, and remembers the choice. A backend that fails later falls back to the CPU for good, and one
+ * that crashes the app in native code is turned off by [diagnostics] and never tried again.
  */
-internal class DepthAnythingRunner(context: Context, private val modelFile: File, private val modelKey: String) : Closeable {
+internal class DepthAnythingRunner(
+    context: Context,
+    private val modelFile: File,
+    private val modelKey: String,
+    private val diagnostics: Diagnostics,
+) : Closeable {
 
     private val cacheDir = File(context.cacheDir, "litert").apply { mkdirs() }
     private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    private class Loaded(val backend: DepthBackend, val model: CompiledModel, val environment: Environment?) : Closeable {
+    private inner class Loaded(val backend: DepthBackend, val model: CompiledModel, val environment: Environment?) : Closeable {
         val inputs: List<TensorBuffer> = model.createInputBuffers()
         val outputs: List<TensorBuffer> = model.createOutputBuffers()
 
-        fun run(input: FloatArray): FloatArray {
+        fun run(input: FloatArray): FloatArray = diagnostics.during(backend.step) {
             inputs[0].writeFloat(input)
             model.run(inputs, outputs)
-            return outputs[0].readFloat()
+            outputs[0].readFloat()
         }
 
         override fun close() {
@@ -76,7 +85,7 @@ internal class DepthAnythingRunner(context: Context, private val modelFile: File
             }
         }
         val remembered = benchmark
-        if (remembered != null) {
+        if (remembered != null && !turnedOff(remembered.chosen)) {
             val opened = try {
                 open(remembered.chosen)
             } catch (e: Exception) {
@@ -101,7 +110,16 @@ internal class DepthAnythingRunner(context: Context, private val modelFile: File
         val reference = cpu.run(input)
         timings[DepthBackend.CPU] = SystemClock.elapsedRealtime() - start
         var best = cpu
+        fun reject(backend: DepthBackend, error: Throwable, candidate: Loaded?) {
+            rejected[backend] = error.message ?: error.javaClass.simpleName
+            Log.i(TAG, "$backend unavailable for depth", error)
+            candidate?.close()
+        }
         for (backend in listOf(DepthBackend.GPU, DepthBackend.NPU)) {
+            if (turnedOff(backend)) {
+                rejected[backend] = "turned off after it crashed the app"
+                continue
+            }
             if (backend == DepthBackend.NPU && !npuAvailable()) {
                 rejected[backend] = "not on this phone"
                 continue
@@ -126,9 +144,10 @@ internal class DepthAnythingRunner(context: Context, private val modelFile: File
                     candidate.close()
                 }
             } catch (e: Exception) {
-                rejected[backend] = e.message ?: e.javaClass.simpleName
-                Log.i(TAG, "$backend unavailable for depth", e)
-                candidate?.close()
+                reject(backend, e, candidate)
+            } catch (e: LinkageError) {
+                // The accelerator's library couldn't load on this phone.
+                reject(backend, e, candidate)
             }
         }
         if (best !== cpu) cpu.close()
@@ -138,10 +157,23 @@ internal class DepthAnythingRunner(context: Context, private val modelFile: File
     }
 
     private fun npuAvailable(): Boolean = try {
-        Environment.create(appContext).use { Accelerator.NPU in it.getAvailableAccelerators() }
+        diagnostics.during(Step.DEPTH_NPU) { Environment.create(appContext).use { Accelerator.NPU in it.getAvailableAccelerators() } }
     } catch (e: Exception) {
         false
     }
+
+    private fun turnedOff(backend: DepthBackend): Boolean = when (backend) {
+        DepthBackend.GPU -> diagnostics.isOff(Fallback.NO_DEPTH_GPU)
+        DepthBackend.NPU -> diagnostics.isOff(Fallback.NO_DEPTH_NPU)
+        DepthBackend.CPU -> false
+    }
+
+    private val DepthBackend.step: Step
+        get() = when (this) {
+            DepthBackend.GPU -> Step.DEPTH_GPU
+            DepthBackend.NPU -> Step.DEPTH_NPU
+            DepthBackend.CPU -> Step.DEPTH_CPU
+        }
 
     private fun open(backend: DepthBackend): Loaded {
         val options = when (backend) {
@@ -158,17 +190,19 @@ internal class DepthAnythingRunner(context: Context, private val modelFile: File
             }
             DepthBackend.NPU -> CompiledModel.Options(Accelerator.NPU)
         }
-        val environment = if (backend == DepthBackend.NPU) Environment.create(appContext) else null
-        try {
-            val model = if (environment != null) {
-                CompiledModel.create(modelFile.absolutePath, options, environment)
-            } else {
-                CompiledModel.create(modelFile.absolutePath, options)
+        return diagnostics.during(backend.step) {
+            val environment = if (backend == DepthBackend.NPU) Environment.create(appContext) else null
+            try {
+                val model = if (environment != null) {
+                    CompiledModel.create(modelFile.absolutePath, options, environment)
+                } else {
+                    CompiledModel.create(modelFile.absolutePath, options)
+                }
+                Loaded(backend, model, environment)
+            } catch (e: Exception) {
+                environment?.close()
+                throw e
             }
-            return Loaded(backend, model, environment)
-        } catch (e: Exception) {
-            environment?.close()
-            throw e
         }
     }
 
