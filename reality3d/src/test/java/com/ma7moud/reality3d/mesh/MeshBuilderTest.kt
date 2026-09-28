@@ -264,4 +264,22 @@ class MeshBuilderTest {
         val cell = (photoWidth - 1f) / MeshDetail.STANDARD.gridCells
         assertTrue("outline off by $worst px", worst < cell)
     }
+
+    @Test
+    fun steepJumpsInReliefAreSpreadButGentleReliefIsKept() {
+        val cols = 30
+        val rows = 20
+        val used = BooleanArray(cols * rows) { true }
+        // A cliff of 0.5 between two columns, and a gentle ramp elsewhere.
+        val relief = FloatArray(cols * rows) { i -> (if (i % cols >= 15) 0.5f else 0f) + (i / cols) * 0.001f }
+        val before = relief.copyOf()
+        MeshBuilder.limitSlopes(relief, used, cols, rows, maxStep = 0.05f)
+        var worst = 0f
+        for (y in 0 until rows) for (x in 0 until cols - 1) worst = maxOf(worst, kotlin.math.abs(relief[y * cols + x + 1] - relief[y * cols + x]))
+        assertTrue("steepest step $worst", worst <= 0.05f * 1.05f)
+        // Far from the cliff nothing moves, and the cliff's two sides keep their average height.
+        assertEquals(before[2], relief[2], 1e-6f)
+        assertEquals(before[cols - 3], relief[cols - 3], 1e-6f)
+        assertEquals(before.average(), relief.average(), 1e-4)
+    }
 }

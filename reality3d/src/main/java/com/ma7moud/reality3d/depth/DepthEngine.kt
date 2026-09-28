@@ -3,6 +3,7 @@ package com.ma7moud.reality3d.depth
 import android.content.Context
 import android.graphics.Bitmap
 import androidx.core.graphics.scale
+import com.ma7moud.reality3d.segmentation.SubjectMask
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -18,10 +19,10 @@ interface DepthEngine {
     suspend fun downloadModel(onProgress: (Float) -> Unit)
 
     /**
-     * Relative depth for [photo]. With a [focus] (left, top, right, bottom of the subject in normalised
-     * photo coordinates) the model looks at the subject and its surroundings at full resolution.
+     * Relative depth for [photo]. With a [subject] mask the model looks at the subject and its
+     * surroundings at full resolution, and the result is cleaned up without mixing subject and background.
      */
-    suspend fun estimate(photo: Bitmap, focus: FloatArray? = null): DepthMap
+    suspend fun estimate(photo: Bitmap, subject: SubjectMask? = null): DepthMap
 }
 
 /** Depth Anything V2 Small through LiteRT, on the fastest backend that gives the same result as the CPU. */
@@ -39,14 +40,26 @@ class DepthAnythingEngine(context: Context) : DepthEngine {
         models.download(onProgress)
     }
 
-    override suspend fun estimate(photo: Bitmap, focus: FloatArray?): DepthMap = withContext(Dispatchers.Default) {
+    override suspend fun estimate(photo: Bitmap, subject: SubjectMask?): DepthMap = withContext(Dispatchers.Default) {
+        val focus = subject?.takeIf { it.coverage > MIN_SUBJECT_COVERAGE }?.bounds()
         val plan = DepthInputPlan.create(photo.width, photo.height, focus, INPUT_WIDTH, INPUT_HEIGHT)
         val content = resize(photo, plan)
         val pixels = IntArray(plan.contentWidth * plan.contentHeight)
         content.getPixels(pixels, 0, plan.contentWidth, 0, 0, plan.contentWidth, plan.contentHeight)
         if (content !== photo) content.recycle()
         val output = runner.run(DepthTensors.pack(pixels, plan, INPUT_WIDTH, INPUT_HEIGHT))
-        DepthTensors.unpack(output, plan, INPUT_WIDTH, photo.width, photo.height)
+        val raw = DepthTensors.unpack(output, plan, INPUT_WIDTH, photo.width, photo.height)
+        // The resized photo lines up with the depth map pixel for pixel, so it guides the clean-up directly.
+        DepthRefiner.refine(raw, pixels, subject?.let { maskOnGrid(it, raw) })
+    }
+
+    /** The subject mask sampled where [depth] samples the photo. */
+    private fun maskOnGrid(mask: SubjectMask, depth: DepthMap): FloatArray {
+        val w = depth.width
+        val h = depth.height
+        val spanX = (depth.right - depth.left) / max(1, w - 1)
+        val spanY = (depth.bottom - depth.top) / max(1, h - 1)
+        return FloatArray(w * h) { i -> mask.sample(depth.left + (i % w) * spanX, depth.top + (i / w) * spanY) }
     }
 
     /** The cropped photo at the plan's content size, halving first so large reductions don't alias. */
@@ -71,6 +84,8 @@ class DepthAnythingEngine(context: Context) : DepthEngine {
     fun rebenchmark() = runner.rebenchmark()
 
     private companion object {
+        const val MIN_SUBJECT_COVERAGE = 0.001f
+
         // The model's fixed input: 686 × 518 RGB.
         const val INPUT_WIDTH = 686
         const val INPUT_HEIGHT = 518

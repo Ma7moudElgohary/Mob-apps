@@ -55,7 +55,7 @@ private class FakeDepth : DepthEngine {
     override val isModelReady = true
     override val downloadBytes = 1L
     override suspend fun downloadModel(onProgress: (Float) -> Unit) = Unit
-    override suspend fun estimate(photo: Bitmap, focus: FloatArray?) =
+    override suspend fun estimate(photo: Bitmap, subject: SubjectMask?) =
         DepthMap(64, 64, FloatArray(64 * 64) { (1f - hypot(it % 64 - 32f, it / 64 - 32f) / 45f).coerceIn(0f, 1f) })
 }
 

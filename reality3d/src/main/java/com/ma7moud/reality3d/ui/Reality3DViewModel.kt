@@ -131,9 +131,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                     null
                 }
                 report("Estimating depth…", null)
-                // With a subject the depth model looks at it and its surroundings at full resolution.
-                val focus = mask?.takeIf { it.coverage > 0.001f }?.bounds()
-                val source = Inputs(photo, services.depth.estimate(photo, focus), mask)
+                val source = Inputs(photo, services.depth.estimate(photo, mask), mask)
                 _state.update { it.copy(depthBackend = services.depth.backendSummary) }
                 inputs = source
                 report("Building the 3D model…", null)

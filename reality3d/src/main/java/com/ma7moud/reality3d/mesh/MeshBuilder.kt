@@ -37,6 +37,14 @@ object MeshBuilder {
     /** Depth models smear depth across edges over about this many depth-map pixels. */
     private const val DEPTH_EDGE_BLUR_PX = 4f
 
+    /** Depth is low-passed over this share of a grid cell before sampling, against aliasing. */
+    private const val PREFILTER_CELLS = 0.5f
+    private const val BACKGROUND_WEIGHT = 1e-3f
+
+    /** Steepest relief allowed between neighbouring grid vertices (rise over run; 4 is about 76°). */
+    private const val MAX_RELIEF_SLOPE = 4f
+    private const val SLOPE_ITERATIONS = 300
+
     fun build(
         depth: DepthMap,
         mask: SubjectMask?,
@@ -71,11 +79,12 @@ object MeshBuilder {
         if (isolated) snapBoundary(gx, gy, topology, foreground, confidence, grid)
 
         // Depth per vertex, with the smeared rim replaced by values from further inside.
+        val filtered = prefilterDepth(depth, if (isolated) mask else null, depth.photoWidth / (cols - 1))
         val raw = FloatArray(n)
         var usedCount = 0
         for (i in 0 until n) {
             if (!used[i]) continue
-            raw[i] = depth.sample(gx[i] / (cols - 1), gy[i] / (rows - 1))
+            raw[i] = filtered.sample(gx[i] / (cols - 1), gy[i] / (rows - 1))
             usedCount++
         }
         if (isolated) {
@@ -107,6 +116,10 @@ object MeshBuilder {
         val scale = 1f / max(max(maxX - minX, maxY - minY), 1e-3f)
         val centerX = (minX + maxX) / 2
         val centerY = (minY + maxY) / 2
+
+        // Where one part hides another the depth jumps; spreading such jumps over a few cells makes them
+        // read as a fold instead of saw-tooth fins along the grid.
+        limitSlopes(middle, used, cols, rows, MAX_RELIEF_SLOPE * scale)
 
         val frontIndex = IntArray(n) { -1 }
         var frontCount = 0
@@ -177,6 +190,85 @@ object MeshBuilder {
     }
 
     private fun edgeKey(a: Int, b: Int): Long = (min(a, b).toLong() shl 32) or max(a, b).toLong()
+
+    /**
+     * Low-passes the depth to the mesh's resolution (a Gaussian over about half a cell), so detail finer
+     * than a cell doesn't alias into stripes and spikes. With a mask only subject pixels are averaged,
+     * and background pixels next to the subject take on the subject's depth.
+     */
+    private fun prefilterDepth(depth: DepthMap, mask: SubjectMask?, pixelsPerCell: Float): DepthMap {
+        val sigma = PREFILTER_CELLS * pixelsPerCell
+        if (sigma < 0.6f) return depth
+        val w = depth.width
+        val h = depth.height
+        val spanX = (depth.right - depth.left) / max(1, w - 1)
+        val spanY = (depth.bottom - depth.top) / max(1, h - 1)
+        val weight = FloatArray(w * h) { i ->
+            if (mask == null || mask.sample(depth.left + (i % w) * spanX, depth.top + (i / w) * spanY) >= MASK_THRESHOLD) 1f else BACKGROUND_WEIGHT
+        }
+        val weighted = FloatArray(w * h) { depth.values[it] * weight[it] }
+        val radius = ceil(3f * sigma).toInt()
+        val kernel = FloatArray(2 * radius + 1) { val d = it - radius; kotlin.math.exp(-d * d / (2f * sigma * sigma)) }
+        val numerator = blurSeparable(weighted, w, h, kernel)
+        val denominator = blurSeparable(weight, w, h, kernel)
+        val values = FloatArray(w * h) { numerator[it] / max(denominator[it], 1e-12f) }
+        return DepthMap(w, h, values, depth.left, depth.top, depth.right, depth.bottom)
+    }
+
+    private fun blurSeparable(values: FloatArray, w: Int, h: Int, kernel: FloatArray): FloatArray {
+        val radius = kernel.size / 2
+        val horizontal = FloatArray(w * h)
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                var sum = 0f
+                for (k in kernel.indices) sum += kernel[k] * values[row + (x + k - radius).coerceIn(0, w - 1)]
+                horizontal[row + x] = sum
+            }
+        }
+        val out = FloatArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                var sum = 0f
+                for (k in kernel.indices) sum += kernel[k] * horizontal[(y + k - radius).coerceIn(0, h - 1) * w + x]
+                out[y * w + x] = sum
+            }
+        }
+        return out
+    }
+
+    /**
+     * Relaxes [relief] until no two neighbouring grid vertices differ by more than [maxStep], moving both
+     * ends of a too-steep edge towards each other. Gentle relief is left as it is.
+     */
+    internal fun limitSlopes(relief: FloatArray, used: BooleanArray, cols: Int, rows: Int, maxStep: Float, iterations: Int = SLOPE_ITERATIONS) {
+        val delta = FloatArray(relief.size)
+        repeat(iterations) {
+            delta.fill(0f)
+            var steep = false
+            for (y in 0 until rows) {
+                for (x in 0 until cols) {
+                    val a = y * cols + x
+                    if (!used[a]) continue
+                    if (x + 1 < cols && relax(relief, delta, used, a, a + 1, maxStep)) steep = true
+                    if (y + 1 < rows && relax(relief, delta, used, a, a + cols, maxStep)) steep = true
+                }
+            }
+            if (!steep) return
+            for (i in relief.indices) relief[i] += delta[i]
+        }
+    }
+
+    private fun relax(relief: FloatArray, delta: FloatArray, used: BooleanArray, a: Int, b: Int, maxStep: Float): Boolean {
+        if (!used[b]) return false
+        val difference = relief[a] - relief[b]
+        val excess = abs(difference) - maxStep
+        if (excess <= 0f) return false
+        val shift = if (difference > 0f) 0.25f * excess else -0.25f * excess
+        delta[a] -= shift
+        delta[b] += shift
+        return true
+    }
 
     /**
      * Writes the counter-clockwise triangle [corner] into [out] at [start], split at the midpoints of
