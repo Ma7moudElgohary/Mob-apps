@@ -235,7 +235,7 @@ private fun OpenProject(
             useGlViewer = useGlViewer,
             metersPerUnit = open.metersPerUnit,
             sizeKnown = info.sizeKnown,
-            onSetRealLength = if (info.kind == ProjectKind.PHOTO) viewModel::setRealLength else null,
+            onSetRealLength = if (info.kind != ProjectKind.SCAN) viewModel::setRealLength else null,
             onScreenshot = actions.shareScreenshot,
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -250,7 +250,7 @@ private fun OpenProject(
             )
         }
         ExportCard(
-            formats = if (info.kind == ProjectKind.PHOTO) SINGLE_PHOTO_FORMATS else ExportFormat.entries - ExportFormat.PHOTOS,
+            formats = if (info.kind == ProjectKind.SCAN) ExportFormat.entries - ExportFormat.PHOTOS else SINGLE_PHOTO_FORMATS,
             solid = open.mesh.solid,
             exporting = exporting,
             onShare = actions.share,
@@ -294,7 +294,11 @@ private fun ConfirmDelete(name: String, onConfirm: () -> Unit, onDismiss: () -> 
 }
 
 private fun summary(project: ProjectInfo): String =
-    (if (project.kind == ProjectKind.SCAN) "360° scan" else "From a photo") + " · " +
+    when (project.kind) {
+        ProjectKind.SCAN -> "360° scan"
+        ProjectKind.PHOTO -> "From a photo"
+        ProjectKind.AI -> "AI full 3D"
+    } + " · " +
         DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(project.createdAt)) +
         (project.quality?.let { " · quality ${it.score}/100" } ?: "")
 

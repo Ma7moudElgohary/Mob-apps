@@ -21,6 +21,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
@@ -39,6 +40,12 @@ import com.ma7moud.reality3d.ai.ShapeHint
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.export.ExportFormat
+import com.ma7moud.reality3d.mesh.GlbWriter
+import com.ma7moud.reality3d.mesh.Mesh3D
+import com.ma7moud.reality3d.remote.RemoteEngine
+import com.ma7moud.reality3d.remote.RemoteServer
+import com.ma7moud.reality3d.remote.RemoteSettings
+import com.ma7moud.reality3d.remote.ServerInfo
 import com.ma7moud.reality3d.preview.ArPreview
 import com.ma7moud.reality3d.preview.ArPreviewFactory
 import com.ma7moud.reality3d.preview.ArPreviewStatus
@@ -68,16 +75,19 @@ import kotlin.math.hypot
 
 /** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
 class TestReality3DApplication : Reality3DApplication() {
-    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), FakeArPreview, useGlViewer = false)
+    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), FakeArPreview, FakeRemote, useGlViewer = false)
 }
 
 /**
  * FileProvider keeps its folders in a static map, but Robolectric gives each test a new data folder
- * while keeping statics, so sharing in a later test would point at an earlier test's folder.
+ * while keeping statics, so sharing in a later test would point at an earlier test's folder. The same
+ * goes for the view model factory, which keeps the first test's Application (and so its services,
+ * saved models and settings) for every later view model.
  */
 internal fun forgetFileProviderFolders() {
     val cache = FileProvider::class.java.getDeclaredField("sCache").apply { isAccessible = true }.get(null) as HashMap<*, *>
     synchronized(cache) { cache.clear() }
+    ViewModelProvider.AndroidViewModelFactory::class.java.getDeclaredField("_instance").apply { isAccessible = true }.set(null, null)
 }
 
 private class FakeDepth : DepthEngine {
@@ -141,6 +151,26 @@ internal object FakeArPreview : ArPreviewFactory {
         override fun close() {
             closed = true
         }
+    }
+}
+
+/** Stands in for the user's computer: an SF3D server that returns a small closed model. */
+internal object FakeRemote : RemoteServer {
+    var uploads = 0
+
+    override suspend fun health(settings: RemoteSettings) = ServerInfo(
+        "Reality3D server", "1.0", authRequired = false,
+        engines = listOf(RemoteEngine("preview", "Quick preview (CPU)", "", true), RemoteEngine("sf3d", "Stable Fast 3D", "Fast and textured", true)),
+    )
+
+    override suspend fun generate(settings: RemoteSettings, png: ByteArray, onProgress: (Float?, String?) -> Unit): ByteArray {
+        uploads++
+        onProgress(0.5f, "Generating the shape")
+        val tetra = Mesh3D(
+            floatArrayOf(0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), FloatArray(12), null,
+            intArrayOf(0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3), solid = true, subjectIsolated = true,
+        )
+        return GlbWriter.write(tetra, texture = null)
     }
 }
 
@@ -242,6 +272,39 @@ class Reality3DSmokeTest {
         val send = chooser.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
         assertNotNull(send)
         assertEquals("model/gltf-binary", send!!.type)
+        assertFalse(viewModel.state.value.isError)
+    }
+
+    @Test
+    fun theComputersAiMakesAFullModel() {
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }
+        waitFor { viewModel.state.value.subjects != null && viewModel.state.value.progress == null }
+        compose.onNodeWithText("Connect to your computer").performScrollTo().performClick()
+        compose.onNode(hasSetTextAction() and hasText("Address, e.g. 192.168.1.20:8765")).performTextInput("8.8.8.8:8765")
+        compose.onNodeWithText("Save and connect").performClick()
+        // Plain http to the internet is refused.
+        waitForText("Plain http only works for servers on your own network. Use https:// for anything else.")
+
+        compose.onNodeWithText("Connect to your computer").performScrollTo().performClick()
+        compose.onNode(hasSetTextAction() and hasText("Address, e.g. 192.168.1.20:8765")).performTextInput("192.168.1.20:8765")
+        compose.onNodeWithText("Save and connect").performClick()
+        waitForText("Connected to 192.168.1.20:8765")
+        // The first AI engine is chosen over the CPU preview.
+        assertEquals("sf3d", viewModel.state.value.remote.settings.engine)
+        compose.onNodeWithText("Make full 3D model").performScrollTo().performClick()
+        waitFor { viewModel.state.value.remote.model != null }
+        assertEquals(1, FakeRemote.uploads)
+        compose.onNodeWithText("Full 3D model · Stable Fast 3D").performScrollTo().assertIsDisplayed()
+        val model = viewModel.state.value.remote.model!!
+        assertEquals(4, model.mesh.triangleCount)
+        // Without a photo model the AI model is given the default size, 20 cm on its longest side.
+        assertEquals(0.2f, viewModel.aiMetersPerUnit(model.mesh) * model.mesh.longestSide, 1e-5f)
+
+        val glb = runBlocking { viewModel.exportAi(ExportFormat.GLB)!! }
+        assertTrue(glb.fileName.endsWith("_ai.glb"))
+        compose.onNodeWithText("Save to My models").performScrollTo().performClick()
+        waitFor { viewModel.state.value.remote.saved === model }
         assertFalse(viewModel.state.value.isError)
     }
 

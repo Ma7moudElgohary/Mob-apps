@@ -2,6 +2,7 @@ package com.ma7moud.reality3d.ui
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
 import androidx.core.graphics.createBitmap
@@ -19,6 +20,7 @@ import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.export.ModelTexture
 import com.ma7moud.reality3d.mesh.GameReadyPack
+import com.ma7moud.reality3d.mesh.GlbReader
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshBuilder
 import com.ma7moud.reality3d.mesh.MeshSettings
@@ -27,6 +29,11 @@ import com.ma7moud.reality3d.project.ProjectDraft
 import com.ma7moud.reality3d.project.ProjectKind
 import com.ma7moud.reality3d.quality.PhotoQuality
 import com.ma7moud.reality3d.quality.QualityReport
+import com.ma7moud.reality3d.remote.RemoteException
+import com.ma7moud.reality3d.remote.RemoteSettings
+import com.ma7moud.reality3d.remote.RemoteSettingsStore
+import com.ma7moud.reality3d.remote.ServerAddress
+import com.ma7moud.reality3d.remote.ServerInfo
 import com.ma7moud.reality3d.segmentation.MaskEdit
 import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.SubjectMask
@@ -73,6 +80,24 @@ data class UiState(
     val saving: Boolean = false,
     /** The model last saved to My models, to show it is saved. */
     val savedMesh: Mesh3D? = null,
+    val remote: RemoteUi = RemoteUi(),
+)
+
+/** A full 3D model made by an image-to-3D AI on the user's computer. */
+class AiModel(val mesh: Mesh3D, val texture: Bitmap?, val engine: String)
+
+/** The connection to the user's Reality3D server and what it made. */
+data class RemoteUi(
+    val settings: RemoteSettings = RemoteSettings(),
+    val server: ServerInfo? = null,
+    val checking: Boolean = false,
+    val status: String? = null,
+    val statusIsError: Boolean = false,
+    val progress: Progress? = null,
+    val model: AiModel? = null,
+    val saving: Boolean = false,
+    /** The AI model last saved to My models. */
+    val saved: AiModel? = null,
 )
 
 /** The objects found in the photo and which of them make the model. */
@@ -135,12 +160,17 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     /** The mask last shown, for rating the photo again. */
     private var lastMask: SubjectMask? = null
     private var inputs: Inputs? = null
+    private val remoteSettings = RemoteSettingsStore(application)
+    private var remoteJob: Job? = null
     private var pipeline: Job? = null
     private var rebuild: Job? = null
     private var pendingSave: ExportFile? = null
 
     init {
         services.ai.refresh()
+        val settings = remoteSettings.load()
+        _state.update { it.copy(remote = it.remote.copy(settings = settings)) }
+        if (settings.url.isNotBlank()) checkServer()
     }
 
     fun onResume() {
@@ -180,6 +210,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         inputs = null
         subjects = null
         lastMask = null
+        remoteJob?.cancel()
+        _state.update { it.copy(remote = it.remote.copy(model = null, progress = null, status = null, saved = null)) }
         closeEditor()
         _state.update {
             it.copy(
@@ -517,6 +549,176 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(metersPerUnit = meters / modelUnits, message = "Real size set. Exports use it too.", isError = false) }
     }
 
+    private fun updateRemote(change: (RemoteUi) -> RemoteUi) = _state.update { it.copy(remote = change(it.remote)) }
+
+    /** Keeps the server's address and access code, then connects to it. */
+    fun saveRemoteSettings(url: String, token: String) {
+        val address = try {
+            ServerAddress.normalize(url)
+        } catch (e: RemoteException) {
+            updateRemote { it.copy(status = e.message, statusIsError = true) }
+            return
+        }
+        val settings = _state.value.remote.settings.copy(url = address, token = token.trim())
+        remoteSettings.save(settings)
+        updateRemote { it.copy(settings = settings, server = null) }
+        checkServer()
+    }
+
+    /** Asks the server what it can do; picks the first AI engine it has when the chosen one isn't there. */
+    fun checkServer() {
+        val settings = _state.value.remote.settings
+        if (settings.url.isBlank() || _state.value.remote.checking) return
+        updateRemote { it.copy(checking = true, status = null, statusIsError = false) }
+        viewModelScope.launch {
+            try {
+                val info = services.remote.health(settings)
+                val available = info.engines.filter { it.available }
+                val engine = settings.engine.takeIf { id -> available.any { it.id == id } }
+                    ?: available.firstOrNull { it.id != PREVIEW_ENGINE }?.id
+                    ?: available.firstOrNull()?.id
+                    ?: settings.engine
+                val updated = settings.copy(engine = engine)
+                remoteSettings.save(updated)
+                updateRemote { it.copy(settings = updated, server = info, checking = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't reach the Reality3D server", e)
+                updateRemote { it.copy(server = null, checking = false, status = e.readable(), statusIsError = true) }
+            }
+        }
+    }
+
+    fun chooseEngine(id: String) {
+        val settings = _state.value.remote.settings.copy(engine = id)
+        remoteSettings.save(settings)
+        updateRemote { it.copy(settings = settings) }
+    }
+
+    /** Sends the cut-out to the server's AI and brings back a full 3D model, back included. */
+    fun makeFullModel() {
+        val photo = _state.value.photo ?: return
+        val settings = _state.value.remote.settings
+        if (remoteJob?.isActive == true) return
+        remoteJob = viewModelScope.launch {
+            updateRemote { it.copy(progress = Progress("Preparing the cut-out…", null), status = null, statusIsError = false) }
+            try {
+                val mask = subjects?.let { currentMask(it) }
+                val png = withContext(Dispatchers.Default) { cutoutPng(photo, mask) }
+                val bytes = services.remote.generate(settings, png) { fraction, message ->
+                    updateRemote { it.copy(progress = Progress(message ?: "The AI is working…", fraction)) }
+                }
+                val engine = _state.value.remote.server?.engines?.firstOrNull { it.id == settings.engine }?.name ?: settings.engine
+                val model = withContext(Dispatchers.Default) {
+                    val read = GlbReader.read(bytes)
+                    AiModel(read.mesh, read.texture?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }, engine)
+                }
+                updateRemote { it.copy(model = model, progress = null) }
+            } catch (e: CancellationException) {
+                updateRemote { it.copy(progress = null) }
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "The full 3D model failed", e)
+                updateRemote { it.copy(progress = null, status = "Couldn't make the full 3D model: ${e.readable()}", statusIsError = true) }
+            }
+        }
+    }
+
+    fun cancelFullModel() {
+        remoteJob?.cancel()
+        updateRemote { it.copy(progress = null) }
+    }
+
+    /**
+     * The object cut out along the mask (transparent background) with a little margin, at most
+     * [CUTOUT_SIZE] pixels across, as image-to-3D AIs expect.
+     */
+    private fun cutoutPng(photo: Bitmap, mask: SubjectMask?): ByteArray {
+        val region = TextureBaker.subjectRegion(mask, margin = 0.06f)
+        val left = (region[0] * photo.width).toInt().coerceIn(0, photo.width - 1)
+        val top = (region[1] * photo.height).toInt().coerceIn(0, photo.height - 1)
+        val width = ((region[2] - region[0]) * photo.width).toInt().coerceIn(1, photo.width - left)
+        val height = ((region[3] - region[1]) * photo.height).toInt().coerceIn(1, photo.height - top)
+        val scale = minOf(1f, CUTOUT_SIZE.toFloat() / maxOf(width, height))
+        val w = maxOf(1, (width * scale).toInt())
+        val h = maxOf(1, (height * scale).toInt())
+        val crop = Bitmap.createBitmap(photo, left, top, width, height)
+        val sized = if (w == width && h == height) crop else crop.scale(w, h)
+        val pixels = IntArray(w * h)
+        sized.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (mask != null) {
+            for (y in 0 until h) {
+                val v = (top + (y + 0.5f) * height / h) / photo.height
+                for (x in 0 until w) {
+                    val u = (left + (x + 0.5f) * width / w) / photo.width
+                    val alpha = (mask.sample(u, v).coerceIn(0f, 1f) * 255f).toInt()
+                    pixels[y * w + x] = (alpha shl 24) or (pixels[y * w + x] and 0xFFFFFF)
+                }
+            }
+        }
+        val out = createBitmap(w, h)
+        out.setPixels(pixels, 0, w, 0, 0, w, h)
+        return Exporter.png(out)
+    }
+
+    /** The AI model's real size per unit: as long as the photo model (set or assumed), which is the same object. */
+    fun aiMetersPerUnit(mesh: Mesh3D): Float {
+        val photoModel = _state.value.mesh
+        val longest = if (photoModel != null) metersPerUnit(photoModel) * photoModel.longestSide else Exporter.DEFAULT_LONGEST_SIDE_METERS
+        return longest / mesh.longestSide.coerceAtLeast(1e-6f)
+    }
+
+    suspend fun exportAi(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
+        val model = _state.value.remote.model ?: return null
+        val name = baseName(_state.value.insight) + "_ai"
+        _state.update { it.copy(exporting = true) }
+        return try {
+            withContext(Dispatchers.Default) {
+                Exporter.encode(
+                    format, model.mesh, model.texture?.let { ModelTexture(it, floatArrayOf(0f, 0f, 1f, 1f)) }, name,
+                    budget = budget, longestSideMeters = aiMetersPerUnit(model.mesh) * model.mesh.longestSide,
+                )
+            }
+        } finally {
+            _state.update { it.copy(exporting = false) }
+        }
+    }
+
+    fun saveAiProject() {
+        val model = _state.value.remote.model ?: return
+        val photo = _state.value.photo ?: return
+        if (_state.value.remote.saving) return
+        updateRemote { it.copy(saving = true) }
+        viewModelScope.launch {
+            try {
+                val info = withContext(Dispatchers.IO) {
+                    services.projects.save(
+                        ProjectDraft(
+                            name = (_state.value.insight?.name ?: "Full 3D model") + " (AI)",
+                            kind = ProjectKind.AI,
+                            mesh = model.mesh,
+                            thumbnail = thumbnailOf(photo, TextureBaker.subjectRegion(lastMask)),
+                            metersPerUnit = aiMetersPerUnit(model.mesh),
+                            sizeKnown = _state.value.metersPerUnit != null,
+                            texture = model.texture,
+                            textureRegion = floatArrayOf(0f, 0f, 1f, 1f),
+                        ),
+                    )
+                }
+                updateRemote { it.copy(saved = model) }
+                _state.update { it.copy(message = "Saved to My models as “${info.name}”.", isError = false) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Saving the AI model failed", e)
+                fail("Couldn't save the model: ${e.readable()}.")
+            } finally {
+                updateRemote { it.copy(saving = false) }
+            }
+        }
+    }
+
     /** Encodes the current model; null when there is none. */
     suspend fun export(format: ExportFormat, budget: GameReadyPack.Budget = GameReadyPack.Budget.MEDIUM): ExportFile? {
         val snapshot = _state.value
@@ -596,6 +798,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         private const val TAG = "Reality3D"
         private const val REBUILD_DELAY_MS = 120L
         private const val THUMBNAIL = 320
+        private const val CUTOUT_SIZE = 1024
+        private const val PREVIEW_ENGINE = "preview"
         const val NO_SUBJECT_MESSAGE =
             "Couldn't separate the subject from the background, so the whole photo was used. A plain background helps."
 

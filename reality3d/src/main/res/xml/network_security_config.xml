@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- Plain http is allowed only so the app can reach the user's own Reality3D server on the local network,
+         which usually has no certificate. The app itself refuses plain http to any other address (see ServerAddress). -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
+</network-security-config>

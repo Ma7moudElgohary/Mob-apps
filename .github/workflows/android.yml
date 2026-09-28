@@ -61,3 +61,21 @@ jobs:
             --latest \
             --title "Reality3D build #${GITHUB_RUN_NUMBER}" \
             --notes "Reality3D Android build from ${GITHUB_SHA::7}."
+
+  server:
+    # The companion server for full 3D from an image-to-3D AI on the user's computer.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Test the Reality3D server
+        working-directory: reality3d-server
+        run: |
+          pip install -r requirements.txt pytest httpx
+          python -m pytest -q tests

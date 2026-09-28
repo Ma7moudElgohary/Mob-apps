@@ -13,7 +13,7 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 
-enum class ProjectKind { PHOTO, SCAN }
+enum class ProjectKind { PHOTO, SCAN, AI }
 
 /** A saved model as listed in the gallery. */
 class ProjectInfo(

@@ -1,0 +1,22 @@
+# Copy to engines.toml (next to server.py) and point each engine at your install.
+# {input} is the phone's cut-out (PNG with a transparent background), {output} a folder for the result;
+# the newest .glb written there is sent back. {texture_size} and {faces} come from the app.
+
+[sf3d]
+# https://github.com/Stability-AI/stable-fast-3d
+command = "python /path/to/stable-fast-3d/run.py {input} --output-dir {output} --texture-resolution {texture_size}"
+
+[triposr]
+# https://github.com/VAST-AI-Research/TripoSR
+command = "python /path/to/TripoSR/run.py {input} --output-dir {output} --model-save-format glb --bake-texture"
+
+[hunyuan3d]
+# https://github.com/Tencent/Hunyuan3D-2 — install its hy3dgen package in this Python environment.
+model = "tencent/Hunyuan3D-2"
+# Texture painting needs its compiled rasterizer; set to false for shape only.
+texture = true
+
+# Any other image-to-3D tool that writes a .glb can be added the same way:
+# [mytool]
+# name = "My tool"
+# command = "python /path/to/tool.py --image {input} --out {output}"

@@ -371,6 +371,34 @@ private fun Reality3DScreen(
             ShapeCard(state.settings, state.rebuilding, viewModel::updateSettings)
         }
         if (photo != null) {
+            FullAiCard(
+                state.remote,
+                busy = busy,
+                onSave = viewModel::saveRemoteSettings,
+                onCheck = viewModel::checkServer,
+                onEngine = viewModel::chooseEngine,
+                onMake = viewModel::makeFullModel,
+                onCancel = viewModel::cancelFullModel,
+            )
+        }
+        state.remote.model?.let { model ->
+            AiModelSection(
+                model = model,
+                useGlViewer = useGlViewer,
+                metersPerUnit = viewModel.aiMetersPerUnit(model.mesh),
+                sizeKnown = state.metersPerUnit != null,
+                saved = state.remote.saved === model,
+                saving = state.remote.saving,
+                exporting = state.exporting,
+                export = viewModel::exportAi,
+                holdForSaving = viewModel::holdForSaving,
+                savePending = viewModel::savePending,
+                onError = { viewModel.showMessage(it, isError = true) },
+                onSave = viewModel::saveAiProject,
+                onViewInAr = onViewInAr,
+            )
+        }
+        if (photo != null) {
             AiCard(
                 ai,
                 state.insight,

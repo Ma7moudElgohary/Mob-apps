@@ -9,6 +9,8 @@ import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthAnythingEngine
 import com.ma7moud.reality3d.preview.ArPreviewFactory
 import com.ma7moud.reality3d.project.ProjectStore
+import com.ma7moud.reality3d.remote.HttpRemoteServer
+import com.ma7moud.reality3d.remote.RemoteServer
 import com.ma7moud.reality3d.scan.ScanEngineFactory
 import com.ma7moud.reality3d.segmentation.MlKitSubjectMasker
 import com.ma7moud.reality3d.segmentation.SubjectSegmenterEngine
@@ -27,6 +29,8 @@ class Services(
     val projects: ProjectStore,
     /** Models standing in the room, through ARCore. */
     val arPreview: ArPreviewFactory,
+    /** Image-to-3D AIs on the user's own computer. */
+    val remote: RemoteServer,
     /** False in JVM tests, which have no OpenGL. */
     val useGlViewer: Boolean = true,
 )
@@ -38,7 +42,7 @@ open class Reality3DApplication : Application() {
     val services: Services by lazy { createServices() }
 
     protected open fun createServices(): Services =
-        Services(DepthAnythingEngine(this), MlKitSubjectMasker(this), AiCoreAnalyzer(appScope), ArCoreScanFactory(), projectStore(), ArCorePreviewFactory())
+        Services(DepthAnythingEngine(this), MlKitSubjectMasker(this), AiCoreAnalyzer(appScope), ArCoreScanFactory(), projectStore(), ArCorePreviewFactory(), HttpRemoteServer())
 
     protected fun projectStore() = ProjectStore(File(filesDir, "projects"))
 }
