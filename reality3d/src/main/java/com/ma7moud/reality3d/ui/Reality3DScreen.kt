@@ -11,46 +11,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Tab
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -103,7 +68,7 @@ private val RealityColors = darkColorScheme(
     onSurface = Color(0xFFF3F7FF),
 )
 
-enum class HomeMode(val title: String) {
+private enum class HomeMode(val title: String) {
     QUICK("Quick Local"),
     SCAN("Scan 360"),
     PROJECTS("Projects"),
@@ -117,7 +82,6 @@ fun Reality3DApp() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Reality3DScreen() {
     val context = LocalContext.current
@@ -127,7 +91,7 @@ private fun Reality3DScreen() {
     val masker = remember { SubjectMasker() }
     val modelManager = remember { DepthAnythingModelManager(context) }
     val backendSelector = remember { LiteRtBackendSelector(context) }
-    val projectStore = remember { ProjectStore(context) }
+    val projects = remember { ProjectStore(context) }
     val ai3d = remember { Ai3dClient(context) }
 
     var homeMode by remember { mutableStateOf(HomeMode.QUICK) }
@@ -137,32 +101,31 @@ private fun Reality3DScreen() {
     var segmentation by remember { mutableStateOf<SegmentationBundle?>(null) }
     var activeMask by remember { mutableStateOf<SubjectMask?>(null) }
     var mesh by remember { mutableStateOf<DepthMesh?>(null) }
-    var currentProject by remember { mutableStateOf<RealityProject?>(null) }
+    var project by remember { mutableStateOf<RealityProject?>(null) }
     var advice by remember { mutableStateOf<ReconstructionAdvice?>(null) }
-
     var aiStatus by remember { mutableStateOf("Checking AICore…") }
     var modelReady by remember { mutableStateOf(modelManager.isReady()) }
-    var downloadProgress by remember { mutableIntStateOf(0) }
+    var modelProgress by remember { mutableIntStateOf(0) }
     var status by remember { mutableStateOf("Choose a mode and capture an object.") }
     var busy by remember { mutableStateOf(false) }
     var benchmarkText by remember { mutableStateOf("") }
+    var projectRefresh by remember { mutableIntStateOf(0) }
 
     var editMode by remember { mutableStateOf<MaskOps.BrushMode?>(null) }
     var brushRadius by remember { mutableFloatStateOf(0.055f) }
-    var viewerRef by remember { mutableStateOf<MeshSurfaceView?>(null) }
+    var viewer by remember { mutableStateOf<MeshSurfaceView?>(null) }
     var viewerMode by remember { mutableStateOf(ViewerMode.TEXTURE) }
     var autoRotate by remember { mutableStateOf(false) }
-    var measurementMode by remember { mutableStateOf(false) }
-    var measurementText by remember { mutableStateOf("Set scale, then tap two points") }
+    var measureMode by remember { mutableStateOf(false) }
+    var measureText by remember { mutableStateOf("Set scale, then tap two points") }
     var scaleText by remember { mutableStateOf("") }
     var showOriginal by remember { mutableStateOf(false) }
     var lightAngle by remember { mutableFloatStateOf(0.65f) }
 
     var aiBackendUrl by remember { mutableStateOf(ai3d.baseUrl) }
     var aiEngine by remember { mutableStateOf("sf3d") }
-    var projectRefresh by remember { mutableIntStateOf(0) }
 
-    fun preferredMask(bundle: SegmentationBundle): SubjectMask =
+    fun selectDefaultMask(bundle: SegmentationBundle): SubjectMask =
         bundle.subjects.maxByOrNull { it.width * it.height }?.mask ?: bundle.foreground
 
     fun loadImage(uri: Uri) {
@@ -172,30 +135,30 @@ private fun Reality3DScreen() {
             runCatching { withContext(Dispatchers.IO) { ImageLoader.load(context, uri) } }
                 .onSuccess { image ->
                     bitmap = image
-                    mesh = null
                     maskedTexture = null
+                    mesh = null
+                    project = null
                     advice = null
-                    currentProject = null
                     status = "Detecting subjects…"
                     runCatching { masker.segment(image) }
                         .onSuccess { bundle ->
                             segmentation = bundle
-                            activeMask = preferredMask(bundle)
-                            status = "Select a subject, refine its mask, or Generate 3D."
+                            activeMask = selectDefaultMask(bundle)
+                            status = "Select/refine the object, then Generate 3D."
                         }
                         .onFailure { error ->
                             segmentation = null
                             activeMask = null
-                            status = "Segmentation unavailable: ${error.message}"
+                            status = "Segmentation failed: ${error.message}"
                         }
                 }
-                .onFailure { error -> status = "Image error: ${error.message}" }
+                .onFailure { status = "Image error: ${it.message}" }
             busy = false
         }
     }
 
-    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) loadImage(uri)
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
+        if (it != null) loadImage(it)
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         if (ok) cameraUri?.let(::loadImage)
@@ -203,15 +166,15 @@ private fun Reality3DScreen() {
     val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val id = result.data?.getStringExtra(ScanActivity.EXTRA_PROJECT_ID)
-            val project = projectStore.list().firstOrNull { it.id == id }
-            val loaded = project?.let(projectStore::loadMesh)
-            if (project != null && loaded != null) {
-                currentProject = project
-                mesh = loaded
-                bitmap = project.thumbnailPath?.let { BitmapFactory.decodeFile(it) }
+            val loadedProject = projects.list().firstOrNull { it.id == id }
+            val loadedMesh = loadedProject?.let(projects::loadMesh)
+            if (loadedProject != null && loadedMesh != null) {
+                project = loadedProject
+                mesh = loadedMesh
+                bitmap = loadedProject.thumbnailPath?.let(BitmapFactory::decodeFile)
                 maskedTexture = bitmap
                 homeMode = HomeMode.QUICK
-                status = "360 scan loaded: ${loaded.triangleCount} triangles. Metric scale is preserved."
+                status = "360 scan loaded: ${loadedMesh.triangleCount} triangles."
             }
             projectRefresh++
         }
@@ -235,11 +198,7 @@ private fun Reality3DScreen() {
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Text(
                 "Reality3D",
@@ -247,9 +206,8 @@ private fun Reality3DScreen() {
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Bold,
             )
-            Text("Local reconstruction • ARCore scanning • AI full-3D", color = Color(0xFFAFBED2))
+            Text("Local AI depth • true AR scan • game-ready export", color = Color(0xFFAFBED2))
         }
-
         ScrollableTabRow(selectedTabIndex = homeMode.ordinal, edgePadding = 8.dp) {
             HomeMode.entries.forEach { item ->
                 Tab(
@@ -261,12 +219,12 @@ private fun Reality3DScreen() {
         }
 
         when (homeMode) {
-            HomeMode.QUICK -> QuickPanel(
+            HomeMode.QUICK -> QuickLocalPanel(
                 context = context,
                 bitmap = bitmap,
                 segmentation = segmentation,
                 activeMask = activeMask,
-                onMask = { activeMask = it },
+                onMaskChanged = { activeMask = it },
                 editMode = editMode,
                 onEditMode = { editMode = it },
                 brushRadius = brushRadius,
@@ -274,40 +232,40 @@ private fun Reality3DScreen() {
                 aiStatus = aiStatus,
                 advice = advice,
                 modelReady = modelReady,
-                downloadProgress = downloadProgress,
+                modelProgress = modelProgress,
                 busy = busy,
                 status = status,
                 benchmarkText = benchmarkText,
                 mesh = mesh,
                 texture = maskedTexture,
-                currentProject = currentProject,
-                viewerRef = viewerRef,
-                setViewer = { viewerRef = it },
+                project = project,
+                viewer = viewer,
+                onViewerCreated = { viewer = it },
                 viewerMode = viewerMode,
-                setViewerMode = {
+                onViewerMode = {
                     viewerMode = it
-                    viewerRef?.setMode(it)
+                    viewer?.setMode(it)
                 },
                 autoRotate = autoRotate,
-                setAutoRotate = {
+                onAutoRotate = {
                     autoRotate = it
-                    viewerRef?.setAutoRotate(it)
+                    viewer?.setAutoRotate(it)
                 },
-                measurementMode = measurementMode,
-                setMeasurementMode = {
-                    measurementMode = it
-                    viewerRef?.measurementEnabled = it
+                measureMode = measureMode,
+                onMeasureMode = {
+                    measureMode = it
+                    viewer?.measurementEnabled = it
                 },
-                measurementText = measurementText,
+                measureText = measureText,
                 scaleText = scaleText,
-                setScaleText = { scaleText = it },
+                onScaleText = { scaleText = it },
                 showOriginal = showOriginal,
-                setShowOriginal = { showOriginal = it },
+                onShowOriginal = { showOriginal = it },
                 lightAngle = lightAngle,
-                setLightAngle = {
+                onLightAngle = {
                     lightAngle = it
                     val angle = it * Math.PI.toFloat() * 2f
-                    viewerRef?.setLight(cos(angle), 0.75f, sin(angle))
+                    viewer?.setLight(cos(angle), 0.75f, sin(angle))
                 },
                 onCamera = {
                     val uri = createCameraUri(context)
@@ -322,17 +280,17 @@ private fun Reality3DScreen() {
                         runCatching { analyzer.analyze(image) }
                             .onSuccess {
                                 advice = it
-                                status = "Advisor recommends ${it.recommendedMode}."
+                                status = "AICore recommends ${it.recommendedMode}."
                             }
                             .onFailure { status = "AICore failed: ${it.message}" }
                         busy = false
                     }
                 },
-                onDownload = {
+                onDownloadModel = {
                     scope.launch {
                         busy = true
                         status = "Downloading Depth Anything V2…"
-                        runCatching { modelManager.download { downloadProgress = it } }
+                        runCatching { modelManager.download { modelProgress = it } }
                             .onSuccess {
                                 modelReady = true
                                 status = "Depth Anything V2 ready."
@@ -350,7 +308,7 @@ private fun Reality3DScreen() {
                             backendSelector.benchmark(modelManager.modelFile, estimator.prepareInput(image))
                         }.onSuccess { results ->
                             benchmarkText = results.joinToString(" • ") { result ->
-                                "${result.backend}: ${result.milliseconds?.let { "${it}ms" } ?: "N/A"}"
+                                "${result.backend}: ${result.milliseconds?.let { ms -> "${ms}ms" } ?: "N/A"}"
                             }
                             status = "Fastest working backend saved."
                         }.onFailure { status = "Benchmark failed: ${it.message}" }
@@ -372,9 +330,9 @@ private fun Reality3DScreen() {
                                 )
                                 Triple(generated, TextureBuilder.masked(image, mask), result.backend)
                             }
-                        }.onSuccess { (generated, texture, backend) ->
+                        }.onSuccess { (generated, textureResult, backend) ->
                             mesh = generated
-                            maskedTexture = texture
+                            maskedTexture = textureResult
                             val quality = QualityScorer.quick(mask, generated)
                             status = "3D ready: ${generated.triangleCount} triangles • $backend • quality ${quality.total}% (${quality.label})."
                         }.onFailure { status = "3D generation failed: ${it.message}" }
@@ -383,65 +341,65 @@ private fun Reality3DScreen() {
                 },
                 onFeather = { activeMask?.let { activeMask = MaskOps.feather(it) } },
                 onAutoRefine = { activeMask?.let { activeMask = MaskOps.autoRefine(it) } },
-                onScale = { targetMeters ->
+                onSetScale = { meters ->
                     mesh?.let {
-                        mesh = MeshMath.scaleToWidth(it, targetMeters)
-                        status = "Metric scale applied. Measurements and AR Preview now use this scale."
+                        mesh = MeshMath.scaleToWidth(it, meters)
+                        status = "Metric scale applied."
                     }
                 },
-                onMeasurement = { measurementText = it },
+                onMeasurement = { measureText = it },
                 onSaveProject = { meshValue, textureValue ->
-                    val project = currentProject ?: projectStore.create(
-                        advice?.objectType?.replaceFirstChar { it.uppercase() } ?: "Quick Object",
+                    val base = project ?: projects.create(
+                        advice?.objectType?.replaceFirstChar { char -> char.uppercase() } ?: "Quick Object",
                         "quick",
                     )
-                    currentProject = projectStore.saveMesh(project, meshValue, textureValue)
+                    project = projects.saveMesh(base, meshValue, textureValue)
                     projectRefresh++
                     status = "Saved to Projects."
                 },
-                onArPreview = currentProject?.let { project ->
+                onArPreview = project?.let { current ->
                     {
                         context.startActivity(
                             Intent(context, ArPreviewActivity::class.java)
-                                .putExtra(ArPreviewActivity.EXTRA_PROJECT_ID, project.id),
+                                .putExtra(ArPreviewActivity.EXTRA_PROJECT_ID, current.id),
                         )
                     }
                 },
             )
 
             HomeMode.SCAN -> ScanPanel(
-                store = projectStore,
+                store = projects,
                 refresh = projectRefresh,
-                onStart = { resume ->
-                    val project = resume ?: projectStore.create(
-                        "360 Scan ${projectStore.list().size + 1}",
+                onStart = { resumeProject ->
+                    val scanProject = resumeProject ?: projects.create(
+                        "360 Scan ${projects.list().size + 1}",
                         "scan360",
                     )
-                    currentProject = project
+                    project = scanProject
                     scanLauncher.launch(
                         Intent(context, ScanActivity::class.java)
-                            .putExtra(ScanActivity.EXTRA_PROJECT_ID, project.id),
+                            .putExtra(ScanActivity.EXTRA_PROJECT_ID, scanProject.id),
                     )
                 },
             )
 
             HomeMode.PROJECTS -> ProjectsPanel(
                 context = context,
-                store = projectStore,
+                store = projects,
                 refresh = projectRefresh,
-                onOpen = { project ->
-                    projectStore.loadMesh(project)?.let { loaded ->
+                onOpen = { selected ->
+                    projects.loadMesh(selected)?.let { loaded ->
+                        project = selected
                         mesh = loaded
-                        currentProject = project
-                        bitmap = project.thumbnailPath?.let { BitmapFactory.decodeFile(it) }
+                        bitmap = selected.thumbnailPath?.let(BitmapFactory::decodeFile)
                         maskedTexture = bitmap
                         homeMode = HomeMode.QUICK
                         status = "Project loaded."
                     }
                 },
                 onDelete = {
-                    projectStore.delete(it)
-                    if (currentProject?.id == it.id) currentProject = null
+                    projects.delete(it)
+                    if (project?.id == it.id) project = null
                     projectRefresh++
                 },
             )
@@ -449,9 +407,9 @@ private fun Reality3DScreen() {
             HomeMode.AI3D -> Ai3dPanel(
                 bitmap = bitmap,
                 url = aiBackendUrl,
-                setUrl = { aiBackendUrl = it },
+                onUrl = { aiBackendUrl = it },
                 engine = aiEngine,
-                setEngine = { aiEngine = it },
+                onEngine = { aiEngine = it },
                 busy = busy,
                 status = status,
                 onGenerate = { image ->
@@ -462,17 +420,12 @@ private fun Reality3DScreen() {
                         runCatching { ai3d.generate(image, aiEngine) }
                             .onSuccess { result ->
                                 status = result.message
-                                shareUris(
+                                val uri = FileProvider.getUriForFile(
                                     context,
-                                    listOf(
-                                        FileProvider.getUriForFile(
-                                            context,
-                                            "${context.packageName}.files",
-                                            result.glb,
-                                        ),
-                                    ),
-                                    "model/gltf-binary",
+                                    "${context.packageName}.files",
+                                    result.glb,
                                 )
+                                shareUris(context, listOf(uri), "model/gltf-binary")
                             }
                             .onFailure { status = "AI 3D failed: ${it.message}" }
                         busy = false
@@ -484,12 +437,12 @@ private fun Reality3DScreen() {
 }
 
 @Composable
-private fun QuickPanel(
+private fun QuickLocalPanel(
     context: Context,
     bitmap: Bitmap?,
     segmentation: SegmentationBundle?,
     activeMask: SubjectMask?,
-    onMask: (SubjectMask) -> Unit,
+    onMaskChanged: (SubjectMask) -> Unit,
     editMode: MaskOps.BrushMode?,
     onEditMode: (MaskOps.BrushMode?) -> Unit,
     brushRadius: Float,
@@ -497,37 +450,37 @@ private fun QuickPanel(
     aiStatus: String,
     advice: ReconstructionAdvice?,
     modelReady: Boolean,
-    downloadProgress: Int,
+    modelProgress: Int,
     busy: Boolean,
     status: String,
     benchmarkText: String,
     mesh: DepthMesh?,
     texture: Bitmap?,
-    currentProject: RealityProject?,
-    viewerRef: MeshSurfaceView?,
-    setViewer: (MeshSurfaceView) -> Unit,
+    project: RealityProject?,
+    viewer: MeshSurfaceView?,
+    onViewerCreated: (MeshSurfaceView) -> Unit,
     viewerMode: ViewerMode,
-    setViewerMode: (ViewerMode) -> Unit,
+    onViewerMode: (ViewerMode) -> Unit,
     autoRotate: Boolean,
-    setAutoRotate: (Boolean) -> Unit,
-    measurementMode: Boolean,
-    setMeasurementMode: (Boolean) -> Unit,
-    measurementText: String,
+    onAutoRotate: (Boolean) -> Unit,
+    measureMode: Boolean,
+    onMeasureMode: (Boolean) -> Unit,
+    measureText: String,
     scaleText: String,
-    setScaleText: (String) -> Unit,
+    onScaleText: (String) -> Unit,
     showOriginal: Boolean,
-    setShowOriginal: (Boolean) -> Unit,
+    onShowOriginal: (Boolean) -> Unit,
     lightAngle: Float,
-    setLightAngle: (Float) -> Unit,
+    onLightAngle: (Float) -> Unit,
     onCamera: () -> Unit,
     onGallery: () -> Unit,
     onAnalyze: (Bitmap) -> Unit,
-    onDownload: () -> Unit,
+    onDownloadModel: () -> Unit,
     onBenchmark: (Bitmap) -> Unit,
     onGenerate: (Bitmap, SubjectMask) -> Unit,
     onFeather: () -> Unit,
     onAutoRefine: () -> Unit,
-    onScale: (Float) -> Unit,
+    onSetScale: (Float) -> Unit,
     onMeasurement: (String) -> Unit,
     onSaveProject: (DepthMesh, Bitmap?) -> Unit,
     onArPreview: (() -> Unit)?,
@@ -551,45 +504,29 @@ private fun QuickPanel(
 
         bitmap?.let { image ->
             activeMask?.let { mask ->
-                Text("Tap a cyan box to select a subject. Use Add / Erase / Auto Refine for difficult edges.")
+                Text("Tap a cyan subject box, then refine edges if needed.")
                 MaskEditor(
                     bitmap = image,
                     mask = mask,
                     subjects = segmentation?.subjects.orEmpty(),
                     editMode = editMode,
                     brushRadius = brushRadius,
-                    onMaskChanged = onMask,
-                    onSubjectSelected = { onMask(it.mask) },
+                    onMaskChanged = onMaskChanged,
+                    onSubjectSelected = { onMaskChanged(it.mask) },
                 )
                 Row(
                     Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    FilterChip(
-                        selected = editMode == null,
-                        onClick = { onEditMode(null) },
-                        label = { Text("Select") },
-                    )
-                    FilterChip(
-                        selected = editMode == MaskOps.BrushMode.ADD,
-                        onClick = { onEditMode(MaskOps.BrushMode.ADD) },
-                        label = { Text("Add") },
-                    )
-                    FilterChip(
-                        selected = editMode == MaskOps.BrushMode.ERASE,
-                        onClick = { onEditMode(MaskOps.BrushMode.ERASE) },
-                        label = { Text("Erase") },
-                    )
+                    FilterChip(editMode == null, { onEditMode(null) }, { Text("Select") })
+                    FilterChip(editMode == MaskOps.BrushMode.ADD, { onEditMode(MaskOps.BrushMode.ADD) }, { Text("Add") })
+                    FilterChip(editMode == MaskOps.BrushMode.ERASE, { onEditMode(MaskOps.BrushMode.ERASE) }, { Text("Erase") })
                     OutlinedButton(onClick = onAutoRefine) { Text("Auto Refine") }
                     OutlinedButton(onClick = onFeather) { Text("Feather") }
                 }
                 if (editMode != null) {
                     Text("Brush size")
-                    Slider(
-                        value = brushRadius,
-                        onValueChange = onBrushRadius,
-                        valueRange = 0.015f..0.15f,
-                    )
+                    Slider(brushRadius, onBrushRadius, valueRange = 0.015f..0.15f)
                 }
             } ?: Image(
                 image.asImageBitmap(),
@@ -603,20 +540,18 @@ private fun QuickPanel(
                     enabled = !busy,
                     modifier = Modifier.weight(1f),
                 ) { Text("AICore Advisor") }
-                if (!modelReady) {
-                    Button(
-                        onClick = onDownload,
-                        enabled = !busy,
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(if (downloadProgress > 0) "Model $downloadProgress%" else "Get Depth Model")
-                    }
-                } else {
+                if (modelReady) {
                     Button(
                         onClick = { activeMask?.let { onGenerate(image, it) } },
                         enabled = !busy && activeMask != null,
                         modifier = Modifier.weight(1f),
                     ) { Text("Generate 3D") }
+                } else {
+                    Button(
+                        onClick = onDownloadModel,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (modelProgress > 0) "Model $modelProgress%" else "Get Depth Model") }
                 }
             }
             if (modelReady) {
@@ -629,13 +564,10 @@ private fun QuickPanel(
         }
 
         if (benchmarkText.isNotBlank()) Text(benchmarkText, color = Color(0xFFC5B7FF))
-        advice?.let { AdviceCard(it) }
+        advice?.let(::AdviceCard)
 
         if (busy) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
                 Text(status)
             }
@@ -644,32 +576,26 @@ private fun QuickPanel(
         }
 
         mesh?.let { generated ->
-            activeMask?.let { mask -> QualityCard(QualityScorer.quick(mask, generated)) }
+            activeMask?.let { QualityCard(QualityScorer.quick(it, generated)) }
 
             Row(
                 Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                FilterChip(
-                    selected = showOriginal,
-                    onClick = { setShowOriginal(!showOriginal) },
-                    label = { Text(if (showOriginal) "Show 3D" else "Before / After") },
-                )
-                ViewerMode.entries.forEach { availableMode ->
-                    FilterChip(
-                        selected = viewerMode == availableMode,
-                        onClick = { setViewerMode(availableMode) },
-                        label = {
-                            Text(availableMode.name.lowercase().replaceFirstChar { it.uppercase() })
-                        },
-                    )
+                FilterChip(showOriginal, { onShowOriginal(!showOriginal) }) {
+                    Text(if (showOriginal) "Show 3D" else "Before / After")
+                }
+                ViewerMode.entries.forEach { available ->
+                    FilterChip(viewerMode == available, { onViewerMode(available) }) {
+                        Text(available.name.lowercase().replaceFirstChar { it.uppercase() })
+                    }
                 }
             }
 
             if (showOriginal && bitmap != null) {
                 Image(
                     bitmap.asImageBitmap(),
-                    contentDescription = "Original photograph",
+                    contentDescription = "Original",
                     modifier = Modifier.fillMaxWidth().height(420.dp),
                 )
             } else {
@@ -678,20 +604,19 @@ private fun QuickPanel(
                         factory = { ctx ->
                             MeshSurfaceView(ctx, generated, texture) { meters, _, vertexB ->
                                 onMeasurement(
-                                    if (vertexB < 0) {
-                                        "Point 1 selected"
-                                    } else {
-                                        meters?.let { "Distance: ${"%.1f".format(it * 1000f)} mm" }
-                                            ?: "Set scale first"
+                                    when {
+                                        vertexB < 0 -> "Point 1 selected"
+                                        meters != null -> "Distance: ${"%.1f".format(meters * 1000f)} mm"
+                                        else -> "Set scale first"
                                     },
                                 )
                             }.also { view ->
                                 view.setMode(viewerMode)
                                 view.setAutoRotate(autoRotate)
-                                view.measurementEnabled = measurementMode
+                                view.measurementEnabled = measureMode
                                 val angle = lightAngle * Math.PI.toFloat() * 2f
                                 view.setLight(cos(angle), 0.75f, sin(angle))
-                                setViewer(view)
+                                onViewerCreated(view)
                             }
                         },
                         modifier = Modifier.fillMaxWidth().height(420.dp),
@@ -703,21 +628,20 @@ private fun QuickPanel(
                 Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                AssistChip(onClick = { viewerRef?.resetCamera() }, label = { Text("Reset") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.FRONT) }, label = { Text("Front") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.RIGHT) }, label = { Text("Right") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.BACK) }, label = { Text("Back") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.LEFT) }, label = { Text("Left") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.TOP) }, label = { Text("Top") })
-                AssistChip(onClick = { viewerRef?.preset(ViewerPreset.ISO) }, label = { Text("ISO") })
-                AssistChip(
-                    onClick = { setAutoRotate(!autoRotate) },
-                    label = { Text(if (autoRotate) "Stop Rotate" else "Auto Rotate") },
-                )
+                AssistChip({ viewer?.resetCamera() }, { Text("Reset") })
+                AssistChip({ viewer?.preset(ViewerPreset.FRONT) }, { Text("Front") })
+                AssistChip({ viewer?.preset(ViewerPreset.RIGHT) }, { Text("Right") })
+                AssistChip({ viewer?.preset(ViewerPreset.BACK) }, { Text("Back") })
+                AssistChip({ viewer?.preset(ViewerPreset.LEFT) }, { Text("Left") })
+                AssistChip({ viewer?.preset(ViewerPreset.TOP) }, { Text("Top") })
+                AssistChip({ viewer?.preset(ViewerPreset.ISO) }, { Text("ISO") })
+                AssistChip({ onAutoRotate(!autoRotate) }) {
+                    Text(if (autoRotate) "Stop Rotate" else "Auto Rotate")
+                }
             }
 
             Text("Light direction")
-            Slider(value = lightAngle, onValueChange = setLightAngle, valueRange = 0f..1f)
+            Slider(lightAngle, onLightAngle, valueRange = 0f..1f)
 
             Row(
                 Modifier.fillMaxWidth(),
@@ -725,19 +649,15 @@ private fun QuickPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedTextField(
-                    value = scaleText,
-                    onValueChange = setScaleText,
-                    label = { Text("Known width (cm)") },
+                    scaleText,
+                    onScaleText,
                     modifier = Modifier.weight(1f),
+                    label = { Text("Known width (cm)") },
                     singleLine = true,
                 )
-                Button(
-                    onClick = {
-                        scaleText.toFloatOrNull()
-                            ?.takeIf { it > 0f }
-                            ?.let { onScale(it / 100f) }
-                    },
-                ) { Text("Set Scale") }
+                Button(onClick = {
+                    scaleText.toFloatOrNull()?.takeIf { it > 0f }?.let { onSetScale(it / 100f) }
+                }) { Text("Set Scale") }
             }
 
             Row(
@@ -746,98 +666,63 @@ private fun QuickPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 FilterChip(
-                    selected = measurementMode,
-                    onClick = { setMeasurementMode(!measurementMode) },
+                    selected = measureMode,
+                    onClick = { onMeasureMode(!measureMode) },
                     label = { Text("Measure") },
                     modifier = Modifier.weight(1f),
                 )
-                Text(measurementText, modifier = Modifier.weight(2f), color = Color(0xFFB8C4D9))
+                Text(measureText, modifier = Modifier.weight(2f), color = Color(0xFFB8C4D9))
             }
 
             Row(
                 Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Button(
-                    onClick = {
+                Button(onClick = {
+                    shareUris(
+                        context,
+                        listOf(GlbExporter.export(context, generated, texture)),
+                        "model/gltf-binary",
+                    )
+                }) { Text("GLB") }
+                OutlinedButton(onClick = {
+                    if (bitmap != null) {
                         shareUris(
                             context,
-                            listOf(GlbExporter.export(context, generated, texture)),
-                            "model/gltf-binary",
-                        )
-                    },
-                ) { Text("GLB") }
-                OutlinedButton(
-                    onClick = {
-                        val original = bitmap
-                        if (original != null) {
-                            shareUris(
-                                context,
-                                ObjExporter.export(context, generated, original),
-                                "application/octet-stream",
-                            )
-                        }
-                    },
-                ) { Text("OBJ") }
-                OutlinedButton(
-                    onClick = {
-                        shareUris(
-                            context,
-                            listOf(StlExporter.export(context, generated)),
-                            "model/stl",
-                        )
-                    },
-                ) { Text("STL") }
-                OutlinedButton(
-                    onClick = {
-                        shareUris(
-                            context,
-                            listOf(PlyExporter.export(context, generated)),
+                            ObjExporter.export(context, generated, bitmap),
                             "application/octet-stream",
                         )
-                    },
-                ) { Text("PLY") }
-                OutlinedButton(
-                    onClick = {
-                        val textureBitmap = texture
-                        if (textureBitmap != null) {
-                            shareUris(
-                                context,
-                                GameReadyExporter.exportUnrealPack(
-                                    context,
-                                    generated,
-                                    textureBitmap,
-                                    25_000,
-                                ),
-                                "model/gltf-binary",
-                            )
-                        }
-                    },
-                ) { Text("Unreal Pack") }
+                    }
+                }) { Text("OBJ") }
+                OutlinedButton(onClick = {
+                    shareUris(context, listOf(StlExporter.export(context, generated)), "model/stl")
+                }) { Text("STL") }
+                OutlinedButton(onClick = {
+                    shareUris(context, listOf(PlyExporter.export(context, generated)), "application/octet-stream")
+                }) { Text("PLY") }
+                OutlinedButton(onClick = {
+                    if (texture != null) {
+                        shareUris(
+                            context,
+                            GameReadyExporter.exportUnrealPack(context, generated, texture, 25_000),
+                            "model/gltf-binary",
+                        )
+                    }
+                }) { Text("Unreal Pack") }
             }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = {
-                        viewerRef?.capture { screenshot ->
-                            val file = File(
-                                context.cacheDir,
-                                "reality3d_${System.currentTimeMillis()}.png",
-                            )
-                            file.outputStream().use {
-                                screenshot.compress(Bitmap.CompressFormat.PNG, 100, it)
-                            }
-                            shareUris(
+                        viewer?.capture { screenshot ->
+                            val file = File(context.cacheDir, "reality3d_${System.currentTimeMillis()}.png")
+                            file.outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                            val uri = FileProvider.getUriForFile(
                                 context,
-                                listOf(
-                                    FileProvider.getUriForFile(
-                                        context,
-                                        "${context.packageName}.files",
-                                        file,
-                                    ),
-                                ),
-                                "image/png",
+                                "${context.packageName}.files",
+                                file,
                             )
+                            shareUris(context, listOf(uri), "image/png")
                         }
                     },
                     modifier = Modifier.weight(1f),
@@ -848,11 +733,10 @@ private fun QuickPanel(
                 ) { Text("Save Project") }
             }
 
-            if (currentProject != null && onArPreview != null) {
-                OutlinedButton(
-                    onClick = onArPreview,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("AR Preview in Real Space") }
+            if (project != null && onArPreview != null) {
+                OutlinedButton(onClick = onArPreview, modifier = Modifier.fillMaxWidth()) {
+                    Text("AR Preview in Real Space")
+                }
             }
         }
     }
@@ -864,29 +748,24 @@ private fun ScanPanel(
     refresh: Int,
     onStart: (RealityProject?) -> Unit,
 ) {
-    val resumableScans = remember(refresh) {
+    val resumable = remember(refresh) {
         store.list().filter { it.mode == "scan360" && it.status == "scanning" }
     }
     Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("True 3D Scan", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "Walk around the object. Reality3D fuses ARCore Raw Depth, confidence, camera intrinsics and pose into a metric TSDF volume.",
-        )
+        Text("Walk around the object. Raw Depth + confidence + camera pose are fused into a metric TSDF volume.")
         Button(onClick = { onStart(null) }, modifier = Modifier.fillMaxWidth()) {
             Text("Start New 360° Scan")
         }
-        resumableScans.forEach { project ->
+        resumable.forEach { scan ->
             Card {
                 Column(Modifier.padding(14.dp)) {
-                    Text(project.name, fontWeight = FontWeight.Bold)
-                    Text("${project.coverage}% coverage • resumable")
-                    OutlinedButton(onClick = { onStart(project) }) { Text("Resume Scan") }
+                    Text(scan.name, fontWeight = FontWeight.Bold)
+                    Text("${scan.coverage}% coverage • resumable")
+                    OutlinedButton(onClick = { onStart(scan) }) { Text("Resume Scan") }
                 }
             }
         }
@@ -901,17 +780,14 @@ private fun ProjectsPanel(
     onOpen: (RealityProject) -> Unit,
     onDelete: (RealityProject) -> Unit,
 ) {
-    val projects = remember(refresh) { store.list() }
+    val list = remember(refresh) { store.list() }
     Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("Projects", style = MaterialTheme.typography.headlineSmall)
-        if (projects.isEmpty()) Text("No saved projects yet.")
-        projects.forEach { project ->
+        if (list.isEmpty()) Text("No saved projects yet.")
+        list.forEach { item ->
             Card {
                 Column(Modifier.fillMaxWidth().padding(12.dp)) {
                     Row(
@@ -919,39 +795,34 @@ private fun ProjectsPanel(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        project.thumbnailPath
-                            ?.let { BitmapFactory.decodeFile(it) }
-                            ?.let { thumb ->
-                                Image(
-                                    thumb.asImageBitmap(),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(72.dp),
-                                )
+                        item.thumbnailPath
+                            ?.let(BitmapFactory::decodeFile)
+                            ?.let { thumbnail ->
+                                Image(thumbnail.asImageBitmap(), null, Modifier.size(72.dp))
                             }
                         Column(Modifier.weight(1f)) {
-                            Text(project.name, fontWeight = FontWeight.Bold)
-                            Text("${project.mode} • ${project.triangleCount} triangles • ${project.coverage}%")
+                            Text(item.name, fontWeight = FontWeight.Bold)
+                            Text("${item.mode} • ${item.triangleCount} triangles • ${item.coverage}%")
                         }
                     }
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        OutlinedButton(
-                            onClick = { onOpen(project) },
-                            modifier = Modifier.weight(1f),
-                        ) { Text("Open") }
+                        OutlinedButton(onClick = { onOpen(item) }, modifier = Modifier.weight(1f)) {
+                            Text("Open")
+                        }
                         OutlinedButton(
                             onClick = {
                                 context.startActivity(
                                     Intent(context, ArPreviewActivity::class.java)
-                                        .putExtra(ArPreviewActivity.EXTRA_PROJECT_ID, project.id),
+                                        .putExtra(ArPreviewActivity.EXTRA_PROJECT_ID, item.id),
                                 )
                             },
-                            enabled = project.meshPath != null,
+                            enabled = item.meshPath != null,
                             modifier = Modifier.weight(1f),
                         ) { Text("AR") }
-                        TextButton(onClick = { onDelete(project) }) { Text("Delete") }
+                        TextButton(onClick = { onDelete(item) }) { Text("Delete") }
                     }
                 }
             }
@@ -963,55 +834,40 @@ private fun ProjectsPanel(
 private fun Ai3dPanel(
     bitmap: Bitmap?,
     url: String,
-    setUrl: (String) -> Unit,
+    onUrl: (String) -> Unit,
     engine: String,
-    setEngine: (String) -> Unit,
+    onEngine: (String) -> Unit,
     busy: Boolean,
     status: String,
     onGenerate: (Bitmap) -> Unit,
 ) {
     Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("AI Full 3D", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "For inferred hidden geometry. Connect a GPU backend running Stable Fast 3D or Hunyuan3D. Quick Local and Scan 360 remain on-device.",
-        )
+        Text("Connect a GPU host running Stable Fast 3D or Hunyuan3D. Quick Local and Scan 360 stay on-device.")
         OutlinedTextField(
-            value = url,
-            onValueChange = setUrl,
-            label = { Text("GPU backend URL") },
+            url,
+            onUrl,
             modifier = Modifier.fillMaxWidth(),
+            label = { Text("GPU backend URL") },
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = engine == "sf3d",
-                onClick = { setEngine("sf3d") },
-                label = { Text("Stable Fast 3D") },
-            )
-            FilterChip(
-                selected = engine == "hunyuan",
-                onClick = { setEngine("hunyuan") },
-                label = { Text("Hunyuan3D") },
-            )
+            FilterChip(engine == "sf3d", { onEngine("sf3d") }, { Text("Stable Fast 3D") })
+            FilterChip(engine == "hunyuan", { onEngine("hunyuan") }, { Text("Hunyuan3D") })
         }
-        bitmap?.let { image ->
-            Image(
-                image.asImageBitmap(),
-                contentDescription = "AI 3D input",
-                modifier = Modifier.fillMaxWidth().height(260.dp),
-            )
+        if (bitmap == null) {
+            Text("Choose a photo in Quick Local first.")
+        } else {
+            Image(bitmap.asImageBitmap(), "AI 3D input", Modifier.fillMaxWidth().height(260.dp))
             Button(
-                onClick = { onGenerate(image) },
+                onClick = { onGenerate(bitmap) },
                 enabled = !busy && url.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Generate Full 3D") }
-        } ?: Text("Choose a photo in Quick Local first.")
+        }
         Text(status, color = Color(0xFFB8C4D9))
     }
 }
@@ -1020,11 +876,7 @@ private fun Ai3dPanel(
 private fun AdviceCard(advice: ReconstructionAdvice) {
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF0A1820))) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                "AICore Reconstruction Advisor",
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold,
-            )
+            Text("AICore Reconstruction Advisor", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
             Text("${advice.objectType} • ${advice.surfaceType} • confidence ${advice.confidence}%")
             Text("Recommended: ${advice.recommendedMode}")
             if (advice.reflective) Text("⚠ Reflective surface")
