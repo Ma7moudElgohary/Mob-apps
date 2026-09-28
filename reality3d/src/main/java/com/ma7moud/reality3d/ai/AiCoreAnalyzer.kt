@@ -27,7 +27,10 @@ sealed interface AiState {
     data class Failed(val message: String) : AiState
 }
 
-/** Looks at the photo and guesses what the object is and how it is shaped. */
+/**
+ * Looks at the photo and advises on the reconstruction: what the object is, its shape, what will be hard
+ * (shine, transparency, thin parts, holes) and whether a 360° scan would do better.
+ */
 interface ObjectAi {
     val state: StateFlow<AiState>
 
@@ -97,7 +100,7 @@ class AiCoreAnalyzer(private val scope: CoroutineScope) : ObjectAi {
         val request = generateContentRequest(ImagePart(photo), TextPart(InsightParser.PROMPT)) {
             temperature = 0.1f
             topK = 8
-            maxOutputTokens = 160
+            maxOutputTokens = 320
         }
         val text = model.generateContent(request).candidates.firstOrNull()?.text.orEmpty()
         InsightParser.parse(text).also {

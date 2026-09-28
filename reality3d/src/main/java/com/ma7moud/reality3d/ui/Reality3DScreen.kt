@@ -82,7 +82,9 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ma7moud.reality3d.ai.AiState
+import com.ma7moud.reality3d.ai.CaptureMode
 import com.ma7moud.reality3d.ai.ObjectInsight
+import com.ma7moud.reality3d.ai.SurfaceType
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
@@ -302,7 +304,15 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
             ShapeCard(state.settings, state.rebuilding, viewModel::updateSettings)
         }
         if (photo != null) {
-            AiCard(ai, state.insight, state.analyzing, onAnalyze = viewModel::analyze, onDownload = viewModel::downloadAi, onRetry = viewModel::retryAi)
+            AiCard(
+                ai,
+                state.insight,
+                state.analyzing,
+                onAnalyze = viewModel::analyze,
+                onDownload = viewModel::downloadAi,
+                onRetry = viewModel::retryAi,
+                onScan = onScan,
+            )
         }
         if (mesh != null) {
             ExportCard(SINGLE_PHOTO_FORMATS, mesh.solid, state.exporting, onShare = { format, budget -> share(format, budget) }, onSave = { format, budget -> save(format, budget) })
@@ -590,12 +600,13 @@ private fun AiCard(
     onAnalyze: () -> Unit,
     onDownload: () -> Unit,
     onRetry: () -> Unit,
+    onScan: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Gemini Nano", style = MaterialTheme.typography.titleMedium)
+            Text("Gemini Nano advisor", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Recognises the object on your phone and sets the shape and thickness to match.",
+                "Looks at the object on your phone, sets the shape to match and says what will be hard to capture.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -606,7 +617,7 @@ private fun AiCard(
                         Spacer(Modifier.width(10.dp))
                         Text("Looking at the photo…")
                     } else {
-                        Text("Recognise object")
+                        Text("Analyse object")
                     }
                 }
                 AiState.NeedsDownload -> OutlinedButton(onClick = onDownload, modifier = Modifier.fillMaxWidth()) {
@@ -637,34 +648,79 @@ private fun AiCard(
                 }
                 AiState.Checking -> Text("Checking…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            insight?.let { InsightView(it) }
+            insight?.let { InsightView(it, onScan) }
         }
     }
 }
 
 @Composable
-private fun InsightView(insight: ObjectInsight) {
+private fun InsightView(insight: ObjectInsight, onScan: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF0A1820))
             .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        insight.name?.let { Text(it, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                insight.name ?: "Your object",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+            )
+            insight.confidence?.let {
+                Text("${(it * 100).roundToInt()}% sure", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
         val details = listOfNotNull(
             insight.shape?.let { "Shape: " + it.name.lowercase().replaceFirstChar(Char::uppercase) },
             insight.thicknessPercent?.let { "thickness about $it% of its width" },
+            if (insight.thinParts == true) "high detail for its thin parts" else null,
         )
         if (details.isNotEmpty()) {
             Text(details.joinToString(", ") + " (applied to the model)", style = MaterialTheme.typography.bodyMedium)
         }
-        insight.tip?.let {
+        val hazards = hazards(insight)
+        if (hazards.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                hazards.forEach { (label, _) ->
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Waiting,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0x33FFC857))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                    )
+                }
+            }
+            hazards.forEach { (_, why) -> Text(why, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+        when (insight.recommendedMode) {
+            CaptureMode.SCAN_360 -> {
+                Text("Recommended: the 360° scan will capture this much better than one photo.", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                FilledTonalButton(onClick = onScan) { Text("Start 360° scan") }
+            }
+            CaptureMode.SINGLE_PHOTO -> Text("Recommended: one photo shows this object well.", style = MaterialTheme.typography.bodyMedium)
+            null -> Unit
+        }
+        insight.tips.forEach {
             Text("Tip: $it", style = MaterialTheme.typography.bodySmall, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
+
+/** What will be hard to capture, with why, from the advisor's reading. */
+private fun hazards(insight: ObjectInsight): List<Pair<String, String>> = listOfNotNull(
+    if (insight.reflective == true) "Shiny" to "Reflections fool depth estimation; soft, even light or a matte spray helps." else null,
+    if (insight.transparent == true) "See-through" to "Cameras can't measure through glass or clear plastic, so the shape will be guessed." else null,
+    if (insight.thinParts == true) "Thin parts" to "Handles, straps and legs can come out thick or broken; the scan keeps them best." else null,
+    if (insight.holes == true) "Holes" to "One photo can't see through gaps; the 360° scan can model them." else null,
+    if (insight.surface == SurfaceType.PLAIN) "Plain surface" to "Few details to lock on to; a textured cloth underneath gives the scan more to track." else null,
+)
 
 @Composable
 internal fun ExportCard(

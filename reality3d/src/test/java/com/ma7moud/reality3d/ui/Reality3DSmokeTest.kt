@@ -21,6 +21,7 @@ import com.ma7moud.reality3d.MainActivity
 import com.ma7moud.reality3d.Reality3DApplication
 import com.ma7moud.reality3d.Services
 import com.ma7moud.reality3d.ai.AiState
+import com.ma7moud.reality3d.ai.CaptureMode
 import com.ma7moud.reality3d.ai.ObjectAi
 import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.ShapeHint
@@ -97,7 +98,10 @@ private class FakeAi : ObjectAi {
     override val state: StateFlow<AiState> = MutableStateFlow(AiState.Ready)
     override fun refresh() = Unit
     override fun download() = Unit
-    override suspend fun describe(photo: Bitmap) = ObjectInsight("Test mug", ShapeHint.ROUND, 90, "Use soft light")
+    override suspend fun describe(photo: Bitmap) = ObjectInsight(
+        name = "Test mug", shape = ShapeHint.ROUND, thicknessPercent = 90, reflective = true, holes = true,
+        recommendedMode = CaptureMode.SCAN_360, confidence = 0.8f, advice = listOf("Use soft light"),
+    )
 }
 
 /** The longest side of a binary STL's bounding box. */
@@ -170,9 +174,12 @@ class Reality3DSmokeTest {
         compose.onNodeWithText("Relief").performScrollTo().performClick()
         waitFor { viewModel.state.value.mesh?.solid == false }
 
-        compose.onNodeWithText("Recognise object").performScrollTo().performClick()
+        compose.onNodeWithText("Analyse object").performScrollTo().performClick()
         waitFor { viewModel.state.value.insight != null }
         compose.onNodeWithText("Test mug").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("80% sure").assertIsDisplayed()
+        compose.onNodeWithText("Shiny").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Tip: Use soft light").performScrollTo().assertIsDisplayed()
         assertEquals(0.9f, viewModel.state.value.settings.thickness, 1e-6f)
 
         compose.onNodeWithText("Share").performScrollTo().performClick()
