@@ -61,12 +61,14 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
     /**
      * How much to trust each depth pixel. Pixels on a depth edge (an object's outline) are skipped: their
      * depth belongs half to the object and half to what is behind it, and would eat into the outline.
-     * Surfaces seen at a grazing angle count less (cos² of the angle, from the depth gradient).
+     * Surfaces seen at a grazing angle count less (cos² of the angle, from the depth gradient). Raw depth
+     * also counts by ARCore's confidence, and its gaps are just missing samples, not edges.
      */
     internal fun pixelWeights(frame: DepthFrame): FloatArray {
         val width = frame.width
         val height = frame.height
         val depth = frame.depthMm
+        val confidence = frame.confidence
         val focal = (frame.intrinsics.fx + frame.intrinsics.fy) / 2
         val weights = FloatArray(width * height)
         for (y in 0 until height) {
@@ -74,11 +76,14 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
                 val index = y * width + x
                 val d = (depth[index].toInt() and 0xFFFF) * 0.001f
                 if (d <= 0f) continue
+                val trust = if (confidence == null) 1f else (confidence[index].toInt() and 0xFF) / 255f
+                if (trust < MIN_CONFIDENCE) continue
                 val jump = max(EDGE_JUMP, EDGE_JUMP_RATIO * d)
                 var edge = false
                 fun neighbour(nx: Int, ny: Int): Float {
                     if (nx < 0 || ny < 0 || nx >= width || ny >= height) return d
                     val value = (depth[ny * width + nx].toInt() and 0xFFFF) * 0.001f
+                    if (value <= 0f && confidence != null) return d
                     if (value <= 0f || kotlin.math.abs(value - d) > jump) {
                         edge = true
                         return d
@@ -93,7 +98,7 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
                 val gx = (right - left) / 2
                 val gy = (down - up) / 2
                 val slope = (gx * gx + gy * gy) * (focal / d) * (focal / d)
-                weights[index] = 1f / (1f + slope)
+                weights[index] = trust / (1f + slope)
             }
         }
         return weights
@@ -251,6 +256,9 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
         private const val MAX_DEPTH_MM = 4_000
         private const val MAX_WEIGHT = 64f
         private const val EDGE_JUMP = 0.01f
+
+        /** Raw depth pixels below this confidence (0..1) are ignored. */
+        private const val MIN_CONFIDENCE = 0.15f
 
         /** Weight a voxel needs (about one head-on view) before it counts as a seen surface. */
         private const val SURFACE_WEIGHT = 1f

@@ -27,6 +27,22 @@ internal object CameraImages {
         return depth
     }
 
+    /** ARCore's raw depth confidence image (8 bits per pixel, 0 = none, 255 = sure). */
+    fun copyConfidence(image: Image): ByteArray {
+        val width = image.width
+        val height = image.height
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val confidence = ByteArray(width * height)
+        for (y in 0 until height) {
+            val row = y * rowStride
+            for (x in 0 until width) confidence[y * width + x] = buffer.get(row + x * pixelStride)
+        }
+        return confidence
+    }
+
     /** A YUV_420_888 camera image in NV21 order, ready for JPEG compression on another thread. */
     class Nv21(val width: Int, val height: Int, private val data: ByteArray) {
         fun toJpeg(quality: Int): ByteArray {

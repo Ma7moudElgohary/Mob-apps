@@ -8,6 +8,7 @@ import android.opengl.Matrix
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
+import com.google.ar.core.Anchor as ArAnchor
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Camera
 import com.google.ar.core.CameraConfig
@@ -27,17 +28,21 @@ import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableException
 import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationException
 import com.ma7moud.reality3d.scan.CameraPose
+import com.ma7moud.reality3d.scan.CoachInput
 import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.DepthFrame
+import com.ma7moud.reality3d.scan.DepthQuality
 import com.ma7moud.reality3d.scan.Intrinsics
 import com.ma7moud.reality3d.scan.Keyframe
 import com.ma7moud.reality3d.scan.KeyframeImage
 import com.ma7moud.reality3d.scan.KeyframeSelector
 import com.ma7moud.reality3d.scan.ScanBox
 import com.ma7moud.reality3d.scan.ScanCapture
+import com.ma7moud.reality3d.scan.ScanCoach
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanEngineFactory
 import com.ma7moud.reality3d.scan.ScanPhase
+import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanReconstructor
 import com.ma7moud.reality3d.scan.ScanStatus
 import com.ma7moud.reality3d.scan.ScanSupport
@@ -88,6 +93,11 @@ class ArCoreScanFactory : ScanEngineFactory {
 /**
  * Scanning with ARCore: tracks the phone, fuses ARCore depth maps into a [TsdfVolume] over the scan box
  * about four times a second, and keeps photos from evenly spread directions for colouring and export.
+ *
+ * Raw depth is fused, weighted by ARCore's confidence, falling back to smoothed depth while raw depth
+ * isn't available. An ARCore anchor at the box follows ARCore's corrections to its map, so camera poses
+ * are expressed relative to it and the fused volume doesn't smear when ARCore adjusts its idea of the
+ * room, including after the camera was paused to look at a first build.
  */
 class ArCoreScanEngine(private val context: Context) : ScanEngine {
 
@@ -103,7 +113,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     @Volatile private var resumed = false
     @Volatile private var phase = ScanPhase.STARTING
     @Volatile private var boxSize = ScanStatus.DEFAULT_BOX_SIZE
-    @Volatile private var anchor: Anchor? = null
+    @Volatile private var anchor: Tap? = null
     @Volatile private var box: ScanBox? = null
     @Volatile private var volume: TsdfVolume? = null
     @Volatile private var message: String? = null
@@ -113,7 +123,16 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     @Volatile private var trackingProblem: String? = null
     @Volatile private var phoneAzimuth: Float? = null
     @Volatile private var phoneRing: Int? = null
+    @Volatile private var anchorLost = false
+    @Volatile private var speed = 0f
+    @Volatile private var turnRate = 0f
+    @Volatile private var distance: Float? = null
+    @Volatile private var boxInView = true
+    @Volatile private var depthQuality: Float? = null
     private val taps = ConcurrentLinkedQueue<FloatArray>()
+
+    /** Work for the GL thread, which owns the ARCore anchor. */
+    private val glActions = ConcurrentLinkedQueue<() -> Unit>()
 
     // Guarded by scanLock: the GL thread fills them while the buttons reset them.
     private val scanLock = Any()
@@ -121,6 +140,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private val selector = KeyframeSelector()
     private val keyframes = CopyOnWriteArrayList<Keyframe>()
     private val depthFrames = AtomicInteger()
+    private var qualitySum = 0.0
+    private var qualityCount = 0
 
     // GL thread only.
     private var cameraTexture = 0
@@ -129,9 +150,24 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private var previousForward: FloatArray? = null
     private var previousPosition: FloatArray? = null
     private var previousFrameAt = 0L
+
+    /** The phone turns and moves slowly enough for sharp photos. */
+    private var steady = false
+    private var lastRawDepthAt = 0L
+    private var boxAnchor: ArAnchor? = null
+    private val anchorOrigin = FloatArray(16)
+    private val anchorNow = FloatArray(16)
+    private val inverse = FloatArray(16)
+
+    /** Maps today's ARCore world onto the one the scan started in: origin × current⁻¹ of the anchor. */
+    private val correction = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
     private val projection = FloatArray(16)
     private val viewMatrix = FloatArray(16)
     private val viewProjection = FloatArray(16)
+    private val overlayProjection = FloatArray(16)
+
+    /** The camera as ARCore reports it now, and in the scan's world (corrected by the anchor). */
+    private val rawPose = FloatArray(16)
     private val poseMatrix = FloatArray(16)
     private val overlayVertices = FloatArray(7 * 256)
     private val dot = FloatArray(3)
@@ -144,7 +180,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private val encoding = AtomicBoolean(false)
 
     /** Where the user tapped: the object's surface, the camera's spot, and the table under it. */
-    private class Anchor(val x: Float, val y: Float, val z: Float, val cameraX: Float, val cameraZ: Float, val floorY: Float?)
+    private class Tap(val x: Float, val y: Float, val z: Float, val cameraX: Float, val cameraZ: Float, val floorY: Float?)
 
     override fun createView(context: Context): View {
         val created = ArScanView(context, this)
@@ -166,10 +202,20 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             selector.reset()
             keyframes.clear()
             depthFrames.set(0)
+            qualitySum = 0.0
+            qualityCount = 0
             volume = TsdfVolume(current)
             message = null
             phase = ScanPhase.SCANNING
         }
+        glActions.offer { dropAnchor() }
+        publish(force = true)
+    }
+
+    override fun continueScanning() {
+        if (volume == null || box == null) return
+        message = null
+        phase = ScanPhase.SCANNING
         publish(force = true)
     }
 
@@ -180,8 +226,11 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             selector.reset()
             keyframes.clear()
             depthFrames.set(0)
+            qualitySum = 0.0
+            qualityCount = 0
             phase = if (box != null) ScanPhase.READY else ScanPhase.PLACE_BOX
         }
+        glActions.offer { dropAnchor() }
         publish(force = true)
     }
 
@@ -228,7 +277,10 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         encoder.submit {}.get()
         val photos = keyframes.toList()
         val mesh = ScanReconstructor.reconstruct(scanned, photos.size, { decode(photos[it]) }, photos.firstOrNull()?.pose, progress)
-        ScanCapture(mesh, photos)
+        val quality = synchronized(scanLock) {
+            ScanQuality.assess(coverage.covered.copyOf(), photos.size, depthFrames.get(), if (qualityCount > 0) (qualitySum / qualityCount).toFloat() else null)
+        }
+        ScanCapture(mesh, photos, quality)
     }
 
     override fun close() {
@@ -278,6 +330,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             return
         }
         background.draw(frame)
+        while (true) glActions.poll()?.invoke() ?: break
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
             trackingProblem = trackingMessage(camera.trackingFailureReason)
@@ -290,15 +343,54 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         if (phase == ScanPhase.FIND_SURFACE && current.getAllTrackables(Plane::class.java).any { it.trackingState == TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING }) {
             phase = ScanPhase.PLACE_BOX
         }
-        camera.pose.toMatrix(poseMatrix, 0)
+        camera.pose.toMatrix(rawPose, 0)
         val now = SystemClock.uptimeMillis()
+        measureMotion(now)
+        if (phase == ScanPhase.SCANNING) {
+            if (boxAnchor == null) box?.let { boxAnchor = createAnchor(current, it) }
+            updateCorrection()
+        }
+        Matrix.multiplyMM(poseMatrix, 0, correction, 0, rawPose, 0)
         if (phase == ScanPhase.SCANNING) scanFrame(frame, camera, now)
         rememberMotion(now)
         camera.getProjectionMatrix(projection, 0, 0.03f, 30f)
         camera.getViewMatrix(viewMatrix, 0)
         Matrix.multiplyMM(viewProjection, 0, projection, 0, viewMatrix, 0)
+        // The box and dome live in the scan's world: map them back into ARCore's current one.
+        Matrix.invertM(inverse, 0, correction, 0)
+        Matrix.multiplyMM(overlayProjection, 0, viewProjection, 0, inverse, 0)
         drawOverlay(overlay)
         publish()
+    }
+
+    private fun createAnchor(session: Session, scanBox: ScanBox): ArAnchor? = try {
+        session.createAnchor(Pose.makeTranslation(scanBox.centerX, scanBox.centerY, scanBox.centerZ)).also {
+            it.pose.toMatrix(anchorOrigin, 0)
+            Matrix.setIdentityM(correction, 0)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "Couldn't anchor the scan box", e)
+        null
+    }
+
+    /** Follows the anchor: while ARCore has lost it, frames aren't used. */
+    private fun updateCorrection() {
+        val current = boxAnchor ?: return
+        if (current.trackingState != TrackingState.TRACKING) {
+            anchorLost = true
+            return
+        }
+        anchorLost = false
+        current.pose.toMatrix(anchorNow, 0)
+        Matrix.invertM(inverse, 0, anchorNow, 0)
+        Matrix.multiplyMM(correction, 0, anchorOrigin, 0, inverse, 0)
+    }
+
+    private fun dropAnchor() {
+        boxAnchor?.detach()
+        boxAnchor = null
+        anchorLost = false
+        Matrix.setIdentityM(correction, 0)
     }
 
     private fun placeFromTap(frame: Frame, camera: Camera, session: Session, x: Float, y: Float) {
@@ -316,7 +408,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         val pose = hit.hitPose
         val floor = floorBelow(session, pose.tx(), pose.ty(), pose.tz())
         val cameraPose = camera.pose
-        anchor = Anchor(pose.tx(), pose.ty(), pose.tz(), cameraPose.tx(), cameraPose.tz(), floor)
+        anchor = Tap(pose.tx(), pose.ty(), pose.tz(), cameraPose.tx(), cameraPose.tz(), floor)
         message = if (floor == null) "No table found under the object, so the box floats. Scanning still works." else null
         placeBox()
         phase = ScanPhase.READY
@@ -348,6 +440,11 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         phoneAzimuth = CoverageTracker.azimuthDegrees(toCamera[0], toCamera[2])
         val cell = CoverageTracker.cellOf(toCamera[0], toCamera[1], toCamera[2])
         phoneRing = if (cell == CoverageTracker.TOP_CELL) CoverageTracker.TOP_RING else cell / CoverageTracker.SEGMENTS
+        val distance = distanceTo(scanBox)
+        this.distance = distance
+        val inView = boxCentreInView(camera, pose, scanBox)
+        boxInView = inView
+        if (anchorLost) return
 
         if (now - lastDepthAt >= DEPTH_INTERVAL_MS && fusing.compareAndSet(false, true)) {
             val depth = acquireDepth(frame, camera, pose)
@@ -357,6 +454,13 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 lastDepthAt = now
                 fusion.execute {
                     try {
+                        DepthQuality.measure(depth, scanBox)?.let { quality ->
+                            depthQuality = quality
+                            synchronized(scanLock) {
+                                qualitySum += quality
+                                qualityCount++
+                            }
+                        }
                         scanVolume.integrate(depth, pool, FUSION_THREADS)
                         depthFrames.incrementAndGet()
                     } catch (e: Exception) {
@@ -368,9 +472,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             }
         }
 
-        val distance = distanceTo(scanBox)
-        if (!encoding.get() && keyframes.size < MAX_PHOTOS && distance in MIN_DISTANCE..MAX_DISTANCE && isSteady(now) &&
-            boxCentreInView(camera, pose, scanBox) && synchronized(scanLock) { selector.isNew(toCamera) }
+        if (!encoding.get() && keyframes.size < MAX_PHOTOS && distance in MIN_DISTANCE..MAX_DISTANCE && steady &&
+            inView && synchronized(scanLock) { selector.isNew(toCamera) }
         ) {
             val image = try {
                 frame.acquireCameraImage()
@@ -405,7 +508,26 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         }
     }
 
+    /** Raw depth with its confidence when ARCore has it (null when no new raw depth came), else smoothed depth. */
     private fun acquireDepth(frame: Frame, camera: Camera, pose: CameraPose): DepthFrame? {
+        try {
+            frame.acquireRawDepthImage16Bits().use { depth ->
+                // Raw depth updates less often than the camera; the same map twice would count double.
+                if (depth.timestamp == lastRawDepthAt) return null
+                frame.acquireRawDepthConfidenceImage().use { confidence ->
+                    lastRawDepthAt = depth.timestamp
+                    return DepthFrame(
+                        depth.width, depth.height, CameraImages.copyDepth(depth),
+                        intrinsicsOf(camera, texture = true).scaledTo(depth.width, depth.height), pose,
+                        CameraImages.copyConfidence(confidence),
+                    )
+                }
+            }
+        } catch (e: NotYetAvailableException) {
+            // No raw depth yet: use the smoothed map.
+        } catch (e: Exception) {
+            Log.w(TAG, "Raw depth unavailable", e)
+        }
         val image = try {
             frame.acquireDepthImage16Bits()
         } catch (e: NotYetAvailableException) {
@@ -445,24 +567,32 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
-    /** Photos are only taken while the phone turns and moves slowly, so they are sharp. */
-    private fun isSteady(now: Long): Boolean {
-        val forward = previousForward ?: return false
-        val position = previousPosition ?: return false
+    /**
+     * The phone's speed and turn rate since the last frame, from ARCore's own poses (anchor corrections
+     * would look like sudden jumps). Smoothed a little, so one jerky frame doesn't flash a warning.
+     */
+    private fun measureMotion(now: Long) {
+        val forward = previousForward
+        val position = previousPosition
         val seconds = (now - previousFrameAt) / 1000f
-        if (seconds <= 0f || seconds > 0.5f) return false
-        val dot = (-poseMatrix[8] * forward[0] - poseMatrix[9] * forward[1] - poseMatrix[10] * forward[2]).coerceIn(-1f, 1f)
+        if (forward == null || position == null || seconds <= 0f || seconds > 0.5f) {
+            steady = false
+            return
+        }
+        val dot = (-rawPose[8] * forward[0] - rawPose[9] * forward[1] - rawPose[10] * forward[2]).coerceIn(-1f, 1f)
         val turn = Math.toDegrees(acos(dot).toDouble()).toFloat() / seconds
-        val dx = poseMatrix[12] - position[0]
-        val dy = poseMatrix[13] - position[1]
-        val dz = poseMatrix[14] - position[2]
-        val speed = sqrt(dx * dx + dy * dy + dz * dz) / seconds
-        return turn < MAX_TURN_DEG_PER_S && speed < MAX_SPEED_M_PER_S
+        val dx = rawPose[12] - position[0]
+        val dy = rawPose[13] - position[1]
+        val dz = rawPose[14] - position[2]
+        val moved = sqrt(dx * dx + dy * dy + dz * dz) / seconds
+        steady = turn < MAX_TURN_DEG_PER_S && moved < MAX_SPEED_M_PER_S
+        turnRate = turnRate * 0.7f + turn * 0.3f
+        speed = speed * 0.7f + moved * 0.3f
     }
 
     private fun rememberMotion(now: Long) {
-        previousForward = floatArrayOf(-poseMatrix[8], -poseMatrix[9], -poseMatrix[10])
-        previousPosition = floatArrayOf(poseMatrix[12], poseMatrix[13], poseMatrix[14])
+        previousForward = floatArrayOf(-rawPose[8], -rawPose[9], -rawPose[10])
+        previousPosition = floatArrayOf(rawPose[12], rawPose[13], rawPose[14])
         previousFrameAt = now
     }
 
@@ -484,7 +614,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         val lineColor = if (scanning) floatArrayOf(0.36f, 0.89f, 0.61f, 0.7f) else floatArrayOf(0.31f, 0.89f, 1f, 0.95f)
         var count = 0
         for (corner in edges) count = putVertex(count, corners[corner], lineColor)
-        overlay.draw(GLES30.GL_LINES, overlayVertices, count, viewProjection)
+        overlay.draw(GLES30.GL_LINES, overlayVertices, count, overlayProjection)
         // Many GPUs only draw lines one pixel wide, so dots along the edges keep the box easy to see.
         count = 0
         for (edge in edges.indices step 2) {
@@ -496,7 +626,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 count = putVertex(count, dot, lineColor)
             }
         }
-        overlay.draw(GLES30.GL_POINTS, overlayVertices, count, viewProjection, pointSize = 10f)
+        overlay.draw(GLES30.GL_POINTS, overlayVertices, count, overlayProjection, pointSize = 10f)
         if (!scanning) return
         // Coverage dome: one dot per direction, green once photographed.
         count = 0
@@ -521,7 +651,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             )
             count = putVertex(count, position, if (covered[cell]) COVERED else MISSING)
         }
-        overlay.draw(GLES30.GL_POINTS, overlayVertices, count, viewProjection, pointSize = 26f)
+        overlay.draw(GLES30.GL_POINTS, overlayVertices, count, overlayProjection, pointSize = 26f)
     }
 
     private fun putVertex(index: Int, position: FloatArray, color: FloatArray): Int {
@@ -541,11 +671,27 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         if (!force && now - lastPublishAt < PUBLISH_INTERVAL_MS) return
         lastPublishAt = now
         _status.value = synchronized(scanLock) {
+            val covered = coverage.covered.copyOf()
+            val coach = if (phase != ScanPhase.SCANNING) null else ScanCoach.advise(
+                CoachInput(
+                    trackingProblem = trackingProblem,
+                    anchorLost = anchorLost,
+                    boxInView = boxInView,
+                    distance = distance,
+                    boxSize = boxSize,
+                    speed = speed,
+                    turnRate = turnRate,
+                    depthQuality = depthQuality,
+                    coverage = covered,
+                    phoneAzimuth = phoneAzimuth,
+                    phoneRing = phoneRing,
+                ),
+            )
             ScanStatus(
                 phase = phase,
                 trackingProblem = trackingProblem,
                 boxSize = boxSize,
-                coverage = coverage.covered.copyOf(),
+                coverage = covered,
                 coverageFraction = coverage.fraction,
                 nextStep = coverage.nextStep(),
                 phoneAzimuth = phoneAzimuth,
@@ -553,6 +699,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 photos = keyframes.size,
                 depthFrames = depthFrames.get(),
                 message = message,
+                coach = coach,
             )
         }
     }

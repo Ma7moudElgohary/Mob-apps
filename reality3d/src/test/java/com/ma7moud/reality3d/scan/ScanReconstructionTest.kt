@@ -60,6 +60,46 @@ class ScanReconstructionTest {
         assertEquals(0f, lowest, 1e-6f)
     }
 
+    /**
+     * Raw depth as ARCore gives it: [missing] of the pixels empty, and [outliers] of the rest several
+     * centimetres off with low confidence; the good pixels are confident.
+     */
+    private fun rawFrame(pose: CameraPose, random: java.util.Random, missing: Float, outliers: Float, withConfidence: Boolean): DepthFrame {
+        val dense = SyntheticScan.depthFrame(pose, noise = 0.002f, random = random)
+        val depth = dense.depthMm.copyOf()
+        val confidence = ByteArray(depth.size)
+        for (i in depth.indices) {
+            when {
+                random.nextFloat() < missing -> depth[i] = 0
+                random.nextFloat() < outliers -> {
+                    depth[i] = (depth[i] + 60).toShort()
+                    confidence[i] = 20
+                }
+                else -> confidence[i] = 220.toByte()
+            }
+        }
+        return DepthFrame(dense.width, dense.height, depth, dense.intrinsics, pose, if (withConfidence) confidence else null)
+    }
+
+    @Test
+    fun sparseRawDepthWithConfidenceIsAsAccurateAsDenseDepth() {
+        val poses = SyntheticScan.ringPoses()
+        fun fused(withConfidence: Boolean): TsdfVolume {
+            val random = java.util.Random(7)
+            return TsdfVolume(SyntheticScan.box, 64).apply {
+                for (pose in poses) integrate(rawFrame(pose, random, missing = 0.5f, outliers = 0.15f, withConfidence = withConfidence))
+            }
+        }
+        val raw = ScanReconstructor.surface(fused(withConfidence = true))
+        assertEquals(0, openEdges(raw.indices))
+        val (mean, p95) = errors(raw.positions)
+        assertTrue("mean error $mean", mean < 0.0015f)
+        assertTrue("95% error $p95", p95 < 0.004f)
+        // Without the confidence map the outliers count in full and push the surface out.
+        val (blindMean, _) = errors(ScanReconstructor.surface(fused(withConfidence = false)).positions)
+        assertTrue("confidence should help: $mean vs $blindMean", mean < blindMean * 0.7f)
+    }
+
     /** How far from its centre the ball touches the table in the model (the real ball touches at one point). */
     private fun ballFootprint(positions: FloatArray): Float {
         var widest = 0f

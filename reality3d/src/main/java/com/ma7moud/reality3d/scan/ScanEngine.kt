@@ -24,6 +24,8 @@ class ScanStatus(
     val photos: Int = 0,
     val depthFrames: Int = 0,
     val message: String? = null,
+    /** What to do right now while scanning, or null to fall back to [nextStep]. */
+    val coach: CoachTip? = null,
 ) {
     companion object {
         const val DEFAULT_BOX_SIZE = 0.4f
@@ -32,8 +34,8 @@ class ScanStatus(
     }
 }
 
-/** A finished scan: the model and the photos it was coloured from. */
-class ScanCapture(val mesh: Mesh3D, val keyframes: List<Keyframe>)
+/** A finished scan: the model, the photos it was coloured from, and how good the capture was. */
+class ScanCapture(val mesh: Mesh3D, val keyframes: List<Keyframe>, val quality: ScanQuality)
 
 /** A 360° scanning session with its own camera view. */
 interface ScanEngine {
@@ -45,6 +47,9 @@ interface ScanEngine {
     fun setBoxSize(meters: Float)
 
     fun startScanning()
+
+    /** After a build, goes back to scanning with everything captured so far, to add more views. */
+    fun continueScanning()
 
     /** Drops what was scanned and goes back to placing the box. */
     fun restart()

@@ -19,12 +19,14 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ma7moud.reality3d.MainActivity
+import com.ma7moud.reality3d.scan.CoachTip
 import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.Keyframe
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanEngineFactory
 import com.ma7moud.reality3d.scan.ScanPhase
+import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanReconstructor
 import com.ma7moud.reality3d.scan.ScanStatus
 import com.ma7moud.reality3d.scan.ScanSupport
@@ -79,6 +81,13 @@ internal class FakeScanEngine : ScanEngine {
         )
     }
 
+    var continued = 0
+
+    override fun continueScanning() {
+        continued++
+        startScanning()
+    }
+
     override fun restart() {
         _status.value = ScanStatus(phase = ScanPhase.READY)
     }
@@ -98,7 +107,8 @@ internal class FakeScanEngine : ScanEngine {
         val poses = SyntheticScan.ringPoses()
         val mesh = ScanReconstructor.reconstruct(SyntheticScan.fuse(poses, resolution = 48), poses.take(6).map { SyntheticScan.photo(it) })
         val keyframes = poses.take(6).map { Keyframe(ByteArray(64) { i -> i.toByte() }, 320, 240, SyntheticScan.colorIntrinsics, it) }
-        ScanCapture(mesh, keyframes)
+        val coverage = _status.value.coverage
+        ScanCapture(mesh, keyframes, ScanQuality.assess(coverage, keyframes.size, 73, 0.7f))
     }
 
     override fun close() {
@@ -142,10 +152,29 @@ class ScanSmokeTest {
         waitForText("Covered 60%")
         compose.onNodeWithText("24 photos · 73 depth maps").assertIsDisplayed()
         compose.onNodeWithText("Now hold the phone higher and go around again, looking down at 45°.").assertIsDisplayed()
+        // The coach takes over when the engine has advice.
+        compose.runOnUiThread {
+            engine.emit(
+                ScanStatus(
+                    phase = ScanPhase.SCANNING, coverageFraction = 0.6f, photos = 24, depthFrames = 73,
+                    coach = CoachTip("Too fast. Move the phone slowly.", CoachTip.Kind.WARNING),
+                ),
+            )
+        }
+        waitForText("Too fast. Move the phone slowly.")
+        compose.runOnUiThread { engine.startScanning() }
         compose.onNodeWithText("Build model").assertIsEnabled().performClick()
 
         waitForText("Your scan")
-        assertTrue(engine.closed)
+        // The camera stays ready to add views to this scan.
+        assertTrue(!engine.closed)
+        compose.onNodeWithText("Scan quality").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("No view from straight above, so the top may be rough.", substring = true).assertExists()
+        compose.onNodeWithText("Add more views to this scan").performScrollTo().performClick()
+        waitForText("Covered 60%")
+        assertEquals(1, engine.continued)
+        compose.onNodeWithText("Build model").assertIsEnabled().performClick()
+        waitForText("Your scan")
         compose.onNodeWithText("3D preview").assertExists()
         // The ball (14 cm across) and the block next to it: 20 cm wide, 14 cm deep, 14 cm high.
         compose.onNodeWithText("Size: ", substring = true).performScrollTo().assertIsDisplayed()
@@ -170,6 +199,7 @@ class ScanSmokeTest {
 
         compose.onNodeWithText("Done").performScrollTo().performClick()
         waitForText("Start 360° scan")
+        assertTrue(engine.closed)
     }
 
     @Test

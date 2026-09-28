@@ -52,10 +52,21 @@ class CameraPose(val matrix: FloatArray) {
     }
 }
 
-/** One ARCore depth map: millimetres per pixel (0 = unknown), with the camera it was seen from. */
-class DepthFrame(val width: Int, val height: Int, val depthMm: ShortArray, val intrinsics: Intrinsics, val pose: CameraPose) {
+/**
+ * One ARCore depth map: millimetres per pixel (0 = unknown), with the camera it was seen from. Raw depth
+ * comes with ARCore's [confidence] per pixel (0..255) and is sparse; smoothed depth has none.
+ */
+class DepthFrame(
+    val width: Int,
+    val height: Int,
+    val depthMm: ShortArray,
+    val intrinsics: Intrinsics,
+    val pose: CameraPose,
+    val confidence: ByteArray? = null,
+) {
     init {
         require(depthMm.size == width * height)
+        require(confidence == null || confidence.size == width * height)
     }
 }
 

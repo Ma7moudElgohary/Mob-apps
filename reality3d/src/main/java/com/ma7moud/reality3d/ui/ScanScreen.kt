@@ -32,7 +32,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
@@ -64,10 +66,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
+import com.ma7moud.reality3d.scan.CoachTip
 import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
+import com.ma7moud.reality3d.scan.ScanCoach
 import com.ma7moud.reality3d.scan.ScanPhase
+import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -119,7 +124,14 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
                 Text(state.label, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
                 Text("This takes a few seconds.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            is ScanScreenState.Result -> ScanResult(state.capture, viewModel, useGlViewer, onScanAgain = { retry() }, onDone = { close() })
+            is ScanScreenState.Result -> ScanResult(
+                state.capture,
+                viewModel,
+                useGlViewer,
+                onAddViews = viewModel::addMoreViews,
+                onScanAgain = { retry() },
+                onDone = { close() },
+            )
             ScanScreenState.NeedsPermission -> Centered(onClose = { close() }) {
                 Text("The scan needs the camera", style = MaterialTheme.typography.titleMedium)
                 Text(
@@ -221,12 +233,27 @@ private fun Instructions(status: ScanStatus) {
         ScanPhase.BUILDING -> "Building…"
         ScanPhase.FAILED -> status.message ?: "Scanning stopped."
     }
+    val coach = status.coach
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Panel).padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        status.trackingProblem?.let { Text(it, color = Warning, fontWeight = FontWeight.SemiBold) }
-        Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        if (coach != null) {
+            // The coach already leads with any tracking problem.
+            Text(
+                coach.text,
+                color = when (coach.kind) {
+                    CoachTip.Kind.WARNING -> Warning
+                    CoachTip.Kind.DONE -> Covered
+                    CoachTip.Kind.INFO -> Color.White
+                },
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        } else {
+            status.trackingProblem?.let { Text(it, color = Warning, fontWeight = FontWeight.SemiBold) }
+            Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        }
         if (status.phase != ScanPhase.FAILED) status.message?.let { Text(it, color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall) }
     }
 }
@@ -256,7 +283,12 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 CoverageRadar(status, Modifier.size(112.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Covered ${(status.coverageFraction * 100).roundToInt()}%", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    val complete = status.coverageFraction >= ScanCoach.COMPLETE
+                    Text(
+                        (if (complete) "Complete · " else "Covered ") + "${(status.coverageFraction * 100).roundToInt()}%",
+                        color = if (complete) Covered else Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                     Text("${status.photos} photos · ${status.depthFrames} depth maps", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
                     Text("Outer ring: low views. Centre: from above. The white dot is you.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
                 }
@@ -312,7 +344,14 @@ private fun CoverageRadar(status: ScanStatus, modifier: Modifier) {
 }
 
 @Composable
-private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlViewer: Boolean, onScanAgain: () -> Unit, onDone: () -> Unit) {
+private fun ScanResult(
+    capture: ScanCapture,
+    viewModel: ScanViewModel,
+    useGlViewer: Boolean,
+    onAddViews: () -> Unit,
+    onScanAgain: () -> Unit,
+    onDone: () -> Unit,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val exporting by viewModel.exporting.collectAsStateWithLifecycle()
@@ -403,6 +442,7 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        QualityCard(capture.quality, onAddViews)
         message?.let { (text, isError) ->
             Text(text, color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -415,6 +455,36 @@ private fun ScanResult(capture: ScanCapture, viewModel: ScanViewModel, useGlView
         )
         OutlinedButton(onClick = onScanAgain, modifier = Modifier.fillMaxWidth()) { Text("Scan something else") }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** The scan's score, what held it back, and the way to fix it: more views of the same scan. */
+@Composable
+private fun QualityCard(quality: ScanQuality, onAddViews: () -> Unit) {
+    val color = when {
+        quality.score >= 85 -> Covered
+        quality.score >= 70 -> MaterialTheme.colorScheme.primary
+        else -> Warning
+    }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Scan quality", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text("${quality.score}/100 · ${quality.grade}", style = MaterialTheme.typography.titleMedium, color = color, fontWeight = FontWeight.SemiBold)
+            }
+            LinearProgressIndicator(progress = { quality.score / 100f }, modifier = Modifier.fillMaxWidth(), color = color)
+            if (quality.issues.isEmpty()) {
+                Text("Every side was covered with good depth.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                quality.issues.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
+            val addViews = @Composable { Text("Add more views to this scan") }
+            if (quality.score < 70) {
+                Button(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { addViews() }
+            } else {
+                OutlinedButton(onClick = onAddViews, modifier = Modifier.fillMaxWidth()) { addViews() }
+            }
+        }
     }
 }
 

@@ -110,7 +110,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 // Progress keeps coming from the worker thread; it must not bring back a scan that was cancelled.
                 val capture = current.build { label -> _screen.update { if (it is ScanScreenState.Building) ScanScreenState.Building(label) else it } }
-                release()
+                // The engine stays open (its camera paused) so more views can be added to this scan.
                 _screen.value = ScanScreenState.Result(capture)
             } catch (e: CancellationException) {
                 throw e
@@ -121,6 +121,15 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                 _screen.value = ScanScreenState.Failed("Couldn't build the model: ${e.message ?: e.javaClass.simpleName}.")
             }
         }
+    }
+
+    /** Back to the camera with everything scanned so far, to fill in what the first build missed. */
+    fun addMoreViews() {
+        val current = engine ?: return
+        if (_screen.value !is ScanScreenState.Result) return
+        _message.value = null
+        current.continueScanning()
+        _screen.value = ScanScreenState.Scanning
     }
 
     /** Back to the start, ready for a new scan. */
