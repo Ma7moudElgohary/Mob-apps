@@ -28,6 +28,8 @@ class ArScanView(
 
     private var session: Session? = null
     private var background: ArCameraBackgroundRenderer? = null
+    private var surfaceWidth = 1
+    private var surfaceHeight = 1
     private var frameCounter = 0
     private var finishing = false
     private val coach = CoverageCoach()
@@ -51,33 +53,38 @@ class ArScanView(
     }
 
     fun resumeAr() {
-        queueEvent {
-            try {
-                if (session == null) {
-                    val install = ArCoreApk.getInstance().requestInstall(activity, true)
-                    if (install == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
-                        activity.runOnUiThread {
-                            callbacks.onStatus("Install/update Google Play Services for AR, then reopen Scan 360.")
-                        }
-                        return@queueEvent
-                    }
-                    val created = Session(activity)
-                    val config = Config(created)
-                    if (!created.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
-                        created.close()
-                        throw IllegalStateException("ARCore Depth API is not supported on this device.")
-                    }
-                    config.depthMode = Config.DepthMode.AUTOMATIC
-                    config.focusMode = Config.FocusMode.AUTO
-                    created.configure(config)
-                    session = created
+        try {
+            if (session == null) {
+                val install = ArCoreApk.getInstance().requestInstall(activity, true)
+                if (install == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+                    callbacks.onStatus("Install/update Google Play Services for AR, then reopen Scan 360.")
+                    return
                 }
-                session?.resume()
-            } catch (e: Throwable) {
-                activity.runOnUiThread { callbacks.onError(e.message ?: e.javaClass.simpleName) }
+                val created = Session(activity)
+                val config = Config(created)
+                if (!created.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                    created.close()
+                    throw IllegalStateException("ARCore Depth API is not supported on this device.")
+                }
+                config.depthMode = Config.DepthMode.AUTOMATIC
+                config.focusMode = Config.FocusMode.AUTO
+                created.configure(config)
+                val rotation = currentRotation()
+                created.setDisplayGeometry(rotation, surfaceWidth, surfaceHeight)
+                session = created
             }
+            queueEvent {
+                try {
+                    session?.resume()
+                    background?.let { session?.setCameraTextureName(it.textureId) }
+                } catch (error: Throwable) {
+                    activity.runOnUiThread { callbacks.onError(error.message ?: error.javaClass.simpleName) }
+                }
+            }
+            super.onResume()
+        } catch (error: Throwable) {
+            callbacks.onError(error.message ?: error.javaClass.simpleName)
         }
-        super.onResume()
     }
 
     fun pauseAr() {
@@ -105,11 +112,14 @@ class ArScanView(
         }.start()
     }
 
-    fun saveSession(file: File) {
+    fun saveSession(file: File, onSaved: ((Boolean) -> Unit)? = null) {
         val v = volume
         val t = target
         val c = coverageState.covered.copyOf()
-        Thread { runCatching { ScanSessionStore.save(file, v, t, c) } }.start()
+        Thread {
+            val success = runCatching { ScanSessionStore.save(file, v, t, c) }.isSuccess
+            if (onSaved != null) activity.runOnUiThread { onSaved(success) }
+        }.start()
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -120,14 +130,10 @@ class ArScanView(
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        GLES30.glViewport(0, 0, width, height)
-        val rotation = if (android.os.Build.VERSION.SDK_INT >= 30) {
-            activity.display?.rotation ?: Surface.ROTATION_0
-        } else {
-            @Suppress("DEPRECATION")
-            activity.windowManager.defaultDisplay.rotation
-        }
-        session?.setDisplayGeometry(rotation, width, height)
+        surfaceWidth = width.coerceAtLeast(1)
+        surfaceHeight = height.coerceAtLeast(1)
+        GLES30.glViewport(0, 0, surfaceWidth, surfaceHeight)
+        session?.setDisplayGeometry(currentRotation(), surfaceWidth, surfaceHeight)
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -159,5 +165,12 @@ class ArScanView(
                 callbacks.onStatus("Point the center reticle at the object and move slightly sideways to initialize depth.")
             }
         }
+    }
+
+    private fun currentRotation(): Int = if (android.os.Build.VERSION.SDK_INT >= 30) {
+        activity.display?.rotation ?: Surface.ROTATION_0
+    } else {
+        @Suppress("DEPRECATION")
+        activity.windowManager.defaultDisplay.rotation
     }
 }

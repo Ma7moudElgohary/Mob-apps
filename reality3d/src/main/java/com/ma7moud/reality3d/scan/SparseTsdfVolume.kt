@@ -7,13 +7,23 @@ class SparseTsdfVolume(
     val truncationMeters: Float = 0.045f,
 ) {
     data class Key(val x: Int, val y: Int, val z: Int)
-    data class Voxel(var tsdf: Float = 1f, var weight: Float = 0f, var r: Float = 0f, var g: Float = 0f, var b: Float = 0f)
+    data class Voxel(
+        var tsdf: Float = 1f,
+        var weight: Float = 0f,
+        var r: Float = 0f,
+        var g: Float = 0f,
+        var b: Float = 0f,
+    )
 
     private val voxels = HashMap<Key, Voxel>()
+
+    @get:Synchronized
     val size: Int get() = voxels.size
 
+    @Synchronized
     fun snapshot(): Map<Key, Voxel> = voxels.mapValues { (_, v) -> v.copy() }
 
+    @Synchronized
     fun integrateSurfacePoint(camera: Vector3, surface: Vector3, confidence: Float, color: Int? = null) {
         val conf = confidence.coerceIn(0.05f, 1f)
         val ray = surface - camera
@@ -61,5 +71,9 @@ class SparseTsdfVolume(
         k.z * voxelSizeMeters,
     )
 
-    fun load(snapshot: Map<Key, Voxel>) { voxels.clear(); snapshot.forEach { (k, v) -> voxels[k] = v.copy() } }
+    @Synchronized
+    fun load(snapshot: Map<Key, Voxel>) {
+        voxels.clear()
+        snapshot.forEach { (k, v) -> voxels[k] = v.copy() }
+    }
 }

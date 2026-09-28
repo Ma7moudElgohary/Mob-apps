@@ -7,8 +7,8 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -28,6 +28,7 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
     private var coverage by mutableStateOf(CoverageState())
     private var status by mutableStateOf("Starting ARCore…")
     private var error by mutableStateOf<String?>(null)
+    private var leavingForPause = false
     private lateinit var store: ProjectStore
     private var projectId: String? = null
     private val tempScan by lazy { File(cacheDir, "reality3d_resume_scan.r3ds") }
@@ -39,8 +40,11 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
         setContent { ScanUi() }
     }
 
-    @Composable private fun ScanUi() {
-        var permissionGranted by remember { mutableStateOf(ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
+    @Composable
+    private fun ScanUi() {
+        var permissionGranted by remember {
+            mutableStateOf(ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+        }
         val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permissionGranted = it }
         LaunchedEffect(Unit) { if (!permissionGranted) launcher.launch(Manifest.permission.CAMERA) }
         MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF4DEBFF), background = Color.Black)) {
@@ -48,7 +52,10 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                 if (permissionGranted) {
                     AndroidView(
                         factory = {
-                            ArScanView(this@ScanActivity, this@ScanActivity, projectResumeFile(), this@ScanActivity).also { view -> scanView = view; view.resumeAr() }
+                            ArScanView(this@ScanActivity, this@ScanActivity, projectResumeFile(), this@ScanActivity).also { view ->
+                                scanView = view
+                                view.resumeAr()
+                            }
                         },
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -56,40 +63,104 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                     Text("Camera permission is required for Scan 360", Modifier.align(Alignment.Center), color = Color.White)
                 }
                 Box(Modifier.size(24.dp).align(Alignment.Center).background(Color(0x553FFFFF), CircleShape))
-                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
                     LinearProgressIndicator(progress = { coverage.coveragePercent / 100f }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    Text("${coverage.coveragePercent}%  •  ${coverage.message()}", color = Color.White)
-                    Text("Depth ${(coverage.depthConfidence * 100).toInt()}%  •  ${"%.2f".format(coverage.distanceMeters)} m", color = Color(0xFFB9C8D8))
+                    Text("${coverage.coveragePercent}% • ${coverage.message()}", color = Color.White)
+                    Text(
+                        "Depth ${(coverage.depthConfidence * 100).toInt()}% • ${"%.2f".format(coverage.distanceMeters)} m",
+                        color = Color(0xFFB9C8D8),
+                    )
+                    if (status != coverage.message()) Text(status, color = Color(0xFFB9C8D8))
                 }
-                error?.let { Text(it, Modifier.align(Alignment.Center).padding(24.dp), color = MaterialTheme.colorScheme.error) }
-                Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedButton(onClick = { persistResume(); finish() }, modifier = Modifier.weight(1f)) { Text("Pause") }
-                    Button(onClick = { scanView?.finishScan() }, enabled = coverage.coveragePercent >= 30, modifier = Modifier.weight(1f)) { Text(if (coverage.coveragePercent >= 85) "Finish Scan" else "Build Preview") }
+                error?.let {
+                    Card(Modifier.align(Alignment.Center).padding(24.dp)) {
+                        Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                Row(
+                    Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            leavingForPause = true
+                            persistResume { finish() }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) { Text("Pause") }
+                    Button(
+                        onClick = { scanView?.finishScan() },
+                        enabled = coverage.coveragePercent >= 30,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (coverage.coveragePercent >= 85) "Finish Scan" else "Build Preview") }
                 }
             }
         }
     }
 
-    private fun projectResumeFile(): File? = projectId?.let { id -> store.list().firstOrNull { it.id == id }?.scanPath?.let(::File) } ?: tempScan.takeIf { it.exists() }
+    private fun projectResumeFile(): File? = projectId
+        ?.let { id -> store.list().firstOrNull { it.id == id }?.scanPath?.let(::File) }
+        ?: tempScan.takeIf { it.exists() }
 
-    private fun persistResume() {
+    private fun persistResume(onComplete: (() -> Unit)? = null) {
         val project = projectId?.let { id -> store.list().firstOrNull { it.id == id } }
         val file = File(cacheDir, "scan_${project?.id ?: "temp"}.r3ds")
-        scanView?.saveSession(file)
-        if (project != null) Thread { Thread.sleep(250); runCatching { store.attachScan(project, file, coverage.coveragePercent) } }.start()
+        val view = scanView
+        if (view == null) {
+            onComplete?.invoke()
+            return
+        }
+        view.saveSession(file) { success ->
+            if (success && project != null) {
+                runCatching { store.attachScan(project, file, coverage.coveragePercent) }
+            }
+            onComplete?.invoke()
+        }
     }
 
-    override fun onResume() { super.onResume(); if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scanView?.resumeAr() }
-    override fun onPause() { persistResume(); scanView?.pauseAr(); super.onPause() }
+    override fun onResume() {
+        super.onResume()
+        leavingForPause = false
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            scanView?.resumeAr()
+        }
+    }
 
-    override fun onCoverage(state: CoverageState) { coverage = state; status = state.message() }
-    override fun onStatus(message: String) { status = message }
-    override fun onError(message: String) { error = message }
+    override fun onPause() {
+        if (!leavingForPause) persistResume()
+        scanView?.pauseAr()
+        super.onPause()
+    }
 
-    override fun onMeshReady(mesh: com.ma7moud.reality3d.mesh.DepthMesh, volume: SparseTsdfVolume, target: Vector3?, coverageBins: BooleanArray) {
-        if (mesh.triangleCount == 0) { error = "Not enough overlapping depth data yet. Keep moving around the object."; return }
-        val project = projectId?.let { id -> store.list().firstOrNull { it.id == id } } ?: store.create("360 Scan", "scan360")
+    override fun onCoverage(state: CoverageState) {
+        coverage = state
+        status = state.message()
+    }
+
+    override fun onStatus(message: String) {
+        status = message
+    }
+
+    override fun onError(message: String) {
+        error = message
+    }
+
+    override fun onMeshReady(
+        mesh: com.ma7moud.reality3d.mesh.DepthMesh,
+        volume: SparseTsdfVolume,
+        target: Vector3?,
+        coverageBins: BooleanArray,
+    ) {
+        if (mesh.triangleCount == 0) {
+            error = "Not enough overlapping depth data yet. Keep moving around the object."
+            return
+        }
+        val project = projectId?.let { id -> store.list().firstOrNull { it.id == id } }
+            ?: store.create("360 Scan", "scan360")
         val saved = store.saveMesh(project, mesh, null, coverage.coveragePercent)
         val file = File(cacheDir, "scan_${saved.id}.r3ds")
         ScanSessionStore.save(file, volume, target, coverageBins)
@@ -98,5 +169,7 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
         finish()
     }
 
-    companion object { const val EXTRA_PROJECT_ID = "project_id" }
+    companion object {
+        const val EXTRA_PROJECT_ID = "project_id"
+    }
 }
