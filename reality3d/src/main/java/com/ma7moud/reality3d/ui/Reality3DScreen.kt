@@ -11,10 +11,12 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -24,7 +26,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -60,6 +61,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -67,13 +69,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.min
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -130,10 +137,16 @@ fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
     MaterialTheme(colorScheme = RealityColors) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             var scanning by rememberSaveable { mutableStateOf(false) }
-            if (scanning) {
-                ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { scanning = false })
-            } else {
-                Reality3DScreen(viewModel, useGlViewer, onScan = { scanning = true })
+            val editor by viewModel.editor.collectAsStateWithLifecycle()
+            val session = editor
+            when {
+                scanning -> ScanScreen(viewModel<ScanViewModel>(), useGlViewer, onClose = { scanning = false })
+                session != null -> MaskEditorScreen(
+                    session,
+                    onCancel = { viewModel.finishEditing(apply = false) },
+                    onDone = { viewModel.finishEditing(apply = true) },
+                )
+                else -> Reality3DScreen(viewModel, useGlViewer, onScan = { scanning = true })
             }
         }
     }
@@ -248,7 +261,16 @@ private fun Reality3DScreen(viewModel: Reality3DViewModel, useGlViewer: Boolean,
             modifier = Modifier.padding(top = 4.dp),
         )
         StatusCard(ai, state.depthModelReady, state.depthDownloadBytes, state.depthBackend, onGetAi = viewModel::downloadAi)
-        PhotoCard(photo, enabled = !busy, onCamera = { takePhoto() }, onGallery = { pickPhoto() })
+        PhotoCard(
+            photo,
+            state.subjects,
+            enabled = !busy,
+            onCamera = { takePhoto() },
+            onGallery = { pickPhoto() },
+            onTapSubject = viewModel::tapSubject,
+            onUseAll = viewModel::useAllSubjects,
+            onEditOutline = viewModel::openEditor,
+        )
         if (photo != null && mesh == null) {
             Button(
                 onClick = viewModel::generate,
@@ -382,7 +404,16 @@ private fun StatusLine(name: String, value: String, dot: Color, modifier: Modifi
 }
 
 @Composable
-private fun PhotoCard(photo: Bitmap?, enabled: Boolean, onCamera: () -> Unit, onGallery: () -> Unit) {
+private fun PhotoCard(
+    photo: Bitmap?,
+    subjects: SubjectsView?,
+    enabled: Boolean,
+    onCamera: () -> Unit,
+    onGallery: () -> Unit,
+    onTapSubject: (Float, Float) -> Unit,
+    onUseAll: () -> Unit,
+    onEditOutline: () -> Unit,
+) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (photo == null) {
@@ -405,13 +436,8 @@ private fun PhotoCard(photo: Bitmap?, enabled: Boolean, onCamera: () -> Unit, on
                     }
                 }
             } else {
-                val image = remember(photo) { photo.asImageBitmap() }
-                Image(
-                    image,
-                    contentDescription = "Selected photo",
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp).clip(RoundedCornerShape(14.dp)),
-                    contentScale = ContentScale.Fit,
-                )
+                SubjectPicker(photo, subjects?.overlay, tappable = enabled && (subjects?.count ?: 0) > 1, onTap = onTapSubject)
+                if (subjects != null) SubjectSummary(subjects, enabled, onUseAll, onEditOutline)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(onClick = onCamera, enabled = enabled, modifier = Modifier.weight(1f)) {
@@ -422,6 +448,50 @@ private fun PhotoCard(photo: Bitmap?, enabled: Boolean, onCamera: () -> Unit, on
                 }
             }
         }
+    }
+}
+
+/** The photo with what is left out of the model dimmed; tapping an object chooses it. */
+@Composable
+private fun SubjectPicker(photo: Bitmap, overlay: Bitmap?, tappable: Boolean, onTap: (Float, Float) -> Unit) {
+    val image = remember(photo) { photo.asImageBitmap() }
+    val layer = remember(overlay) { overlay?.asImageBitmap() }
+    val currentOnTap by rememberUpdatedState(onTap)
+    val ratio = photo.width.toFloat() / photo.height
+    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val height = min(maxWidth / ratio, 300.dp)
+        val tap = if (tappable) {
+            Modifier.pointerInput(Unit) { detectTapGestures { currentOnTap(it.x / size.width, it.y / size.height) } }
+        } else {
+            Modifier
+        }
+        Canvas(
+            Modifier
+                .size(height * ratio, height)
+                .clip(RoundedCornerShape(14.dp))
+                .semantics { contentDescription = "Selected photo" }
+                .then(tap),
+        ) {
+            val target = IntSize(size.width.roundToInt(), size.height.roundToInt())
+            drawImage(image, dstSize = target, filterQuality = FilterQuality.Medium)
+            layer?.let { drawImage(it, dstSize = target, filterQuality = FilterQuality.Medium) }
+        }
+    }
+}
+
+@Composable
+private fun SubjectSummary(subjects: SubjectsView, enabled: Boolean, onUseAll: () -> Unit, onEditOutline: () -> Unit) {
+    val text = when {
+        subjects.edited -> "Using your edited outline; the dimmed part is left out."
+        subjects.count == 0 -> "Nothing stood out from the background, so the whole photo is used. Paint the object in with Edit outline."
+        subjects.count == 1 -> "Object found; the dimmed part is left out."
+        subjects.selection.isEmpty() -> "${subjects.count} objects found. Tap one to model only it."
+        else -> "${subjects.selection.size} of ${subjects.count} objects chosen. Tap to add or remove."
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+        if (subjects.selection.isNotEmpty()) TextButton(onClick = onUseAll, enabled = enabled) { Text("Use all") }
+        FilledTonalButton(onClick = onEditOutline, enabled = enabled) { Text("Edit outline") }
     }
 }
 
@@ -542,7 +612,7 @@ private fun ShapeCard(settings: MeshSettings, rebuilding: Boolean, onChange: ((M
 }
 
 @Composable
-private fun LabeledSlider(
+internal fun LabeledSlider(
     label: String,
     value: Float,
     valueText: String,

@@ -3,11 +3,17 @@ package com.ma7moud.reality3d.ui
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Looper
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,6 +26,8 @@ import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.ShapeHint
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthMap
+import com.ma7moud.reality3d.segmentation.Segmentation
+import com.ma7moud.reality3d.segmentation.Subject
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import com.ma7moud.reality3d.segmentation.SubjectSegmenterEngine
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,11 +67,25 @@ private class FakeDepth : DepthEngine {
         DepthMap(64, 64, FloatArray(64 * 64) { (1f - hypot(it % 64 - 32f, it / 64 - 32f) / 45f).coerceIn(0f, 1f) })
 }
 
+/** Two round objects: a big one left of centre and a small one on the right. */
 private class FakeSegmenter : SubjectSegmenterEngine {
-    override suspend fun segment(photo: Bitmap, onProgress: (String, Float?) -> Unit): SubjectMask {
+    override suspend fun segment(photo: Bitmap, onProgress: (String, Float?) -> Unit): Segmentation {
         val w = photo.width
         val h = photo.height
-        return SubjectMask(w, h, FloatArray(w * h) { if (hypot(it % w - w / 2f, it / w - h / 2f) < h * 0.4f) 1f else 0f })
+        val big = disc(w * 0.375f, h * 0.5f, h * 0.33f, w, h)
+        val small = disc(w * 0.8f, h * 0.5f, h * 0.17f, w, h)
+        val foreground = SubjectMask(w, h, FloatArray(w * h) { i -> maxOf(big.at(i % w, i / w), small.at(i % w, i / w)) })
+        return Segmentation(w, h, foreground, listOf(big, small))
+    }
+
+    private fun disc(cx: Float, cy: Float, r: Float, w: Int, h: Int): Subject {
+        val left = (cx - r).toInt().coerceAtLeast(0)
+        val top = (cy - r).toInt().coerceAtLeast(0)
+        val width = minOf(w - left, (2 * r).toInt() + 2)
+        val height = minOf(h - top, (2 * r).toInt() + 2)
+        return Subject(left, top, width, height, FloatArray(width * height) { i ->
+            if (hypot(left + i % width - cx, top + i / width - cy) < r) 1f else 0f
+        })
     }
 }
 
@@ -99,6 +121,8 @@ class Reality3DSmokeTest {
         compose.onNodeWithText("Gemini Nano: ").assertExists()
         val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
         compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }
+        waitFor { viewModel.state.value.subjects != null && viewModel.state.value.progress == null }
+        assertEquals(2, viewModel.state.value.subjects!!.count)
 
         compose.onNodeWithText("Make 3D model").performScrollTo().performClick()
         waitFor { viewModel.state.value.mesh != null }
@@ -124,5 +148,46 @@ class Reality3DSmokeTest {
         assertNotNull(send)
         assertEquals("model/gltf-binary", send!!.type)
         assertFalse(viewModel.state.value.isError)
+    }
+
+    @Test
+    fun tappingAnObjectModelsOnlyItAndTheOutlineCanBePainted() {
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }
+        waitFor { viewModel.state.value.subjects != null && viewModel.state.value.progress == null }
+        compose.onNodeWithText("2 objects found. Tap one to model only it.").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Make 3D model").performScrollTo().performClick()
+        waitFor { viewModel.state.value.mesh != null && viewModel.state.value.progress == null }
+        val both = viewModel.state.value.mesh!!
+        assertTrue(both.uvs!!.filterIndexed { i, _ -> i % 2 == 0 }.min() < 0.3f)
+
+        // Tap the small object on the right: the model is remade from it alone.
+        compose.onNodeWithContentDescription("Selected photo").performScrollTo().performTouchInput {
+            click(Offset(width * 0.8f, height * 0.5f))
+        }
+        waitFor { viewModel.state.value.subjects?.selection == setOf(1) && viewModel.state.value.mesh !== both && viewModel.state.value.progress == null }
+        val small = viewModel.state.value.mesh!!
+        assertTrue(small.subjectIsolated)
+        assertTrue(small.uvs!!.filterIndexed { i, _ -> i % 2 == 0 }.min() > 0.6f)
+        compose.onNodeWithText("1 of 2 objects chosen. Tap to add or remove.").performScrollTo().assertIsDisplayed()
+
+        // Erase a stripe through it in the editor.
+        compose.onNodeWithText("Edit outline").performScrollTo().performClick()
+        waitFor { viewModel.editor.value != null }
+        compose.onNodeWithText("Erase").performClick()
+        compose.onNodeWithContentDescription("Outline editor").performTouchInput {
+            swipe(Offset(width * 0.8f, 0f), Offset(width * 0.8f, height.toFloat()), durationMillis = 300)
+        }
+        compose.onNodeWithText("Undo").assertIsEnabled()
+        compose.onNodeWithText("Done").performClick()
+        waitFor { viewModel.state.value.subjects?.edited == true && viewModel.state.value.mesh !== small && viewModel.state.value.progress == null }
+        assertTrue(viewModel.editor.value == null)
+        compose.onNodeWithText("Using your edited outline; the dimmed part is left out.").performScrollTo().assertIsDisplayed()
+        assertFalse(viewModel.state.value.isError)
+
+        // Choosing all objects again keeps the painted stroke.
+        compose.onNodeWithText("Use all").performScrollTo().performClick()
+        waitFor { viewModel.state.value.subjects?.selection?.isEmpty() == true && viewModel.state.value.progress == null }
+        assertTrue(viewModel.state.value.subjects!!.edited)
     }
 }

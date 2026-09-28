@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import androidx.core.content.FileProvider
+import androidx.core.graphics.createBitmap
 import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.mesh.GlbWriter
 import com.ma7moud.reality3d.mesh.Mesh3D
@@ -104,7 +105,7 @@ object Exporter {
         val pixels = IntArray(w * h)
         source.getPixels(pixels, 0, w, x0, y0, w, h)
         if (!alpha) for (i in pixels.indices) pixels[i] = pixels[i] or (0xFF shl 24)
-        val region = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val region = createBitmap(w, h)
         if (alpha) region.isPremultiplied = false
         region.setPixels(pixels, 0, w, 0, 0, w, h)
         val out = ByteArrayOutputStream()

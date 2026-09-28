@@ -15,31 +15,51 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** Separates the photographed subject from its background. */
+/** Separates the photographed objects from their background. */
 interface SubjectSegmenterEngine {
-    /** The subject's confidence mask, or null when nothing could be told apart from the background. */
-    suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): SubjectMask?
+    /**
+     * The foreground and each object on its own, or null when nothing could be told apart from the
+     * background.
+     */
+    suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): Segmentation?
 }
 
 /** ML Kit subject segmentation. Its model comes from Google Play services and is fetched on first use. */
 class MlKitSubjectMasker(private val context: Context) : SubjectSegmenterEngine {
 
     private val segmenter by lazy {
-        SubjectSegmentation.getClient(SubjectSegmenterOptions.Builder().enableForegroundConfidenceMask().build())
+        SubjectSegmentation.getClient(
+            SubjectSegmenterOptions.Builder()
+                .enableForegroundConfidenceMask()
+                .enableMultipleSubjects(SubjectSegmenterOptions.SubjectResultOptions.Builder().enableConfidenceMask().build())
+                .build(),
+        )
     }
     private val installer by lazy { ModuleInstall.getClient(context) }
 
-    override suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): SubjectMask? {
+    override suspend fun segment(photo: Bitmap, onProgress: (label: String, fraction: Float?) -> Unit): Segmentation? {
         ensureModel(onProgress)
         onProgress("Separating the subject from the background…", null)
         val result = segmenter.process(InputImage.fromBitmap(photo, 0)).awaitResult()
-        val buffer = result.foregroundConfidenceMask ?: return null
-        buffer.rewind()
-        val count = photo.width * photo.height
-        if (buffer.remaining() < count) return null
-        val values = FloatArray(count)
-        buffer.get(values)
-        return SubjectMask(photo.width, photo.height, values).takeIf { it.coverage in MIN_COVERAGE..MAX_COVERAGE }
+        val foreground = result.foregroundConfidenceMask?.let { buffer ->
+            buffer.rewind()
+            val count = photo.width * photo.height
+            if (buffer.remaining() < count) return@let null
+            val values = FloatArray(count)
+            buffer.get(values)
+            SubjectMask(photo.width, photo.height, values).takeIf { it.coverage in MIN_COVERAGE..MAX_COVERAGE }
+        } ?: return null
+        val subjects = result.subjects.mapNotNull { subject ->
+            val buffer = subject.confidenceMask ?: return@mapNotNull null
+            if (subject.width <= 0 || subject.height <= 0) return@mapNotNull null
+            buffer.rewind()
+            val count = subject.width * subject.height
+            if (buffer.remaining() < count) return@mapNotNull null
+            val values = FloatArray(count)
+            buffer.get(values)
+            Subject(subject.startX, subject.startY, subject.width, subject.height, values)
+        }.filter { it.area >= photo.width * photo.height * MIN_COVERAGE }.sortedByDescending { it.area }
+        return Segmentation(photo.width, photo.height, foreground, subjects)
     }
 
     private suspend fun ensureModel(onProgress: (String, Float?) -> Unit) {

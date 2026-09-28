@@ -4,6 +4,8 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ma7moud.reality3d.Reality3DApplication
@@ -21,6 +23,8 @@ import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.mesh.MeshBuilder
 import com.ma7moud.reality3d.mesh.MeshSettings
 import com.ma7moud.reality3d.mesh.TextureBaker
+import com.ma7moud.reality3d.segmentation.MaskEdit
+import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,6 +60,20 @@ data class UiState(
     val analyzing: Boolean = false,
     val rebuilding: Boolean = false,
     val exporting: Boolean = false,
+    /** The objects found in the photo, once it has been looked at. */
+    val subjects: SubjectsView? = null,
+)
+
+/** The objects found in the photo and which of them make the model. */
+data class SubjectsView(
+    /** Separate objects found; 0 when nothing stood out from the background. */
+    val count: Int,
+    /** The chosen objects; empty means all of them. */
+    val selection: Set<Int>,
+    /** Drawn over the photo: dims what is left out and tints the objects not chosen. */
+    val overlay: Bitmap,
+    /** The outline was changed by hand. */
+    val edited: Boolean,
 )
 
 class Reality3DViewModel(application: Application) : AndroidViewModel(application) {
@@ -75,6 +93,29 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     /** What the current photo's model is built from; settings changes rebuild from it without the models. */
     private class Inputs(val photo: Bitmap, val depth: DepthMap, val mask: SubjectMask?, val texture: ModelTexture)
 
+    /** The photo's objects: what the segmenter found, the chosen ones and any outline painted by hand. */
+    private class PhotoSubjects(
+        val photo: Bitmap,
+        val segmentation: Segmentation?,
+        val editWidth: Int,
+        val editHeight: Int,
+        /** The photo's brightness at editing resolution, for snapping outlines to its edges. */
+        val guide: FloatArray,
+    ) {
+        var selection: Set<Int> = emptySet()
+
+        /** Strokes and settings from the editor; its base is set from [selection] whenever it is used. */
+        var edit: MaskEdit? = null
+
+        val count: Int get() = segmentation?.subjects?.size ?: 0
+    }
+
+    private val _editor = MutableStateFlow<MaskEditorSession?>(null)
+
+    /** The open mask editor, if any. */
+    val editor: StateFlow<MaskEditorSession?> = _editor.asStateFlow()
+
+    private var subjects: PhotoSubjects? = null
     private var inputs: Inputs? = null
     private var pipeline: Job? = null
     private var rebuild: Job? = null
@@ -94,24 +135,91 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         rebuild?.cancel()
         pipeline = viewModelScope.launch {
             _state.update { it.copy(progress = Progress("Opening the photo…", null), message = null, isError = false) }
-            try {
-                val photo = withContext(Dispatchers.IO) { ImageLoader.load(getApplication(), uri) }
-                setPhoto(photo)
+            val photo = try {
+                withContext(Dispatchers.IO) { ImageLoader.load(getApplication(), uri) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Couldn't open photo", e)
                 fail("Couldn't open that photo (${e.readable()}).")
+                return@launch
             }
+            showPhoto(photo)
+            findSubjects(photo)
         }
     }
 
     fun setPhoto(photo: Bitmap) {
+        pipeline?.cancel()
         rebuild?.cancel()
-        inputs = null
-        _state.update {
-            it.copy(photo = photo, mesh = null, texture = null, insight = null, progress = null, isError = false, message = null)
+        pipeline = viewModelScope.launch {
+            showPhoto(photo)
+            findSubjects(photo)
         }
+    }
+
+    private fun showPhoto(photo: Bitmap) {
+        inputs = null
+        subjects = null
+        closeEditor()
+        _state.update {
+            it.copy(photo = photo, mesh = null, texture = null, insight = null, subjects = null, progress = null, isError = false, message = null)
+        }
+    }
+
+    /**
+     * Looks for the objects in the photo, so they can be picked before the model is made. Returns null if
+     * the segmenter failed; [generate] tries again.
+     */
+    private suspend fun findSubjects(photo: Bitmap): PhotoSubjects? {
+        report("Finding the objects…", null)
+        val segmentation = try {
+            services.segmenter.segment(photo) { label, fraction -> report(label, fraction) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Subject segmentation failed", e)
+            _state.update { it.copy(progress = null) }
+            return null
+        }
+        val found = withContext(Dispatchers.Default) { examine(photo, segmentation) }
+        subjects = found
+        publishSubjects(found)
+        _state.update { it.copy(progress = null) }
+        return found
+    }
+
+    private fun examine(photo: Bitmap, segmentation: Segmentation?): PhotoSubjects {
+        val (w, h) = MaskEdit.sizeFor(photo.width, photo.height)
+        val small = if (w == photo.width && h == photo.height) photo else photo.scale(w, h)
+        val pixels = IntArray(w * h)
+        small.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (small !== photo) small.recycle()
+        return PhotoSubjects(photo, segmentation, w, h, MaskEdit.brightness(pixels))
+    }
+
+    /** The mask the model is made from: the chosen objects, with any outline painted by hand. */
+    private suspend fun currentMask(found: PhotoSubjects): SubjectMask? {
+        val selection = found.selection
+        val edit = found.edit?.copy()
+        return withContext(Dispatchers.Default) {
+            val chosen = found.segmentation?.maskFor(selection)
+            if (edit == null) return@withContext chosen
+            edit.setBase(chosen)
+            edit.toSubjectMask().takeIf { it.coverage > 0f }
+        }
+    }
+
+    /** Shows the objects over the photo. */
+    private suspend fun publishSubjects(found: PhotoSubjects) {
+        val selection = found.selection
+        val mask = currentMask(found)
+        val overlay = withContext(Dispatchers.Default) {
+            val pixels = MaskOverlay.render(mask, found.segmentation, selection, found.editWidth, found.editHeight)
+            MaskOverlay.toBitmap(pixels, found.editWidth, found.editHeight)
+        }
+        if (subjects !== found) return
+        _state.update { it.copy(subjects = SubjectsView(found.count, selection, overlay, found.edit != null)) }
     }
 
     fun generate() {
@@ -120,39 +228,12 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         rebuild?.cancel()
         pipeline = viewModelScope.launch {
             try {
-                if (!services.depth.isModelReady) {
-                    val label = "Downloading the depth model (${formatBytes(services.depth.downloadBytes)}, only once)…"
-                    report(label, 0f)
-                    services.depth.downloadModel { report(label, it) }
-                    _state.update { it.copy(depthModelReady = true) }
+                ensureDepthModel()
+                val found = subjects ?: findSubjects(photo) ?: withContext(Dispatchers.Default) { examine(photo, null) }.also {
+                    subjects = it
+                    publishSubjects(it)
                 }
-                report("Finding the subject…", null)
-                val mask = try {
-                    services.segmenter.segment(photo) { label, fraction -> report(label, fraction) }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "Subject segmentation failed", e)
-                    null
-                }
-                report("Estimating depth…", null)
-                val depth = services.depth.estimate(photo, mask)
-                val source = Inputs(photo, depth, mask, withContext(Dispatchers.Default) { bakeTexture(photo, mask) })
-                _state.update { it.copy(depthBackend = services.depth.backendSummary) }
-                inputs = source
-                report("Building the 3D model…", null)
-                val settings = _state.value.settings
-                val mesh = build(source, settings)
-                _state.update {
-                    it.copy(
-                        mesh = mesh,
-                        texture = source.texture.bitmap,
-                        progress = null,
-                        isError = false,
-                        message = if (mesh.subjectIsolated) null else NO_SUBJECT_MESSAGE,
-                    )
-                }
-                if (_state.value.settings != settings) scheduleRebuild()
+                makeModel(photo, found)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -160,6 +241,117 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                 fail("3D generation failed: ${e.readable()}.")
             }
         }
+    }
+
+    private suspend fun ensureDepthModel() {
+        if (services.depth.isModelReady) return
+        val label = "Downloading the depth model (${formatBytes(services.depth.downloadBytes)}, only once)…"
+        report(label, 0f)
+        services.depth.downloadModel { report(label, it) }
+        _state.update { it.copy(depthModelReady = true) }
+    }
+
+    private suspend fun makeModel(photo: Bitmap, found: PhotoSubjects) {
+        val mask = currentMask(found)
+        report("Estimating depth…", null)
+        val depth = services.depth.estimate(photo, mask)
+        val source = Inputs(photo, depth, mask, withContext(Dispatchers.Default) { bakeTexture(photo, mask) })
+        _state.update { it.copy(depthBackend = services.depth.backendSummary) }
+        inputs = source
+        report("Building the 3D model…", null)
+        val settings = _state.value.settings
+        val mesh = build(source, settings)
+        _state.update {
+            it.copy(
+                mesh = mesh,
+                texture = source.texture.bitmap,
+                progress = null,
+                isError = false,
+                message = if (mesh.subjectIsolated) null else NO_SUBJECT_MESSAGE,
+            )
+        }
+        if (_state.value.settings != settings) scheduleRebuild()
+    }
+
+    /**
+     * Chooses the object at normalised photo point ([u], [v]): the first tap models it alone, later taps
+     * add or remove objects. Choosing all of them is the same as choosing none.
+     */
+    fun tapSubject(u: Float, v: Float) {
+        val found = subjects ?: return
+        if (found.count < 2 || pipeline?.isActive == true) return
+        val index = found.segmentation?.subjectAt(u, v) ?: return
+        val current = found.selection
+        var next = when {
+            current.isEmpty() -> setOf(index)
+            index in current -> current - index
+            else -> current + index
+        }
+        if (next.size == found.count) next = emptySet()
+        found.selection = next
+        subjectsChanged(found)
+    }
+
+    fun useAllSubjects() {
+        val found = subjects ?: return
+        if (found.selection.isEmpty() || pipeline?.isActive == true) return
+        found.selection = emptySet()
+        subjectsChanged(found)
+    }
+
+    /** The mask changed: redraw it over the photo, and remake the model if there is one. */
+    private fun subjectsChanged(found: PhotoSubjects) {
+        val photo = found.photo
+        val remake = _state.value.mesh != null
+        pipeline?.cancel()
+        rebuild?.cancel()
+        pipeline = viewModelScope.launch {
+            try {
+                publishSubjects(found)
+                if (remake) {
+                    ensureDepthModel()
+                    makeModel(photo, found)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Remaking the model failed", e)
+                fail("Couldn't remake the model: ${e.readable()}.")
+            }
+        }
+    }
+
+    /** Opens the mask editor on the current outline. */
+    fun openEditor() {
+        val photo = _state.value.photo ?: return
+        if (_editor.value != null || pipeline?.isActive == true) return
+        pipeline = viewModelScope.launch {
+            val found = subjects ?: withContext(Dispatchers.Default) { examine(photo, null) }.also { subjects = it }
+            val selection = found.selection
+            val saved = found.edit
+            val edit = withContext(Dispatchers.Default) {
+                (saved?.copy() ?: MaskEdit(found.editWidth, found.editHeight, found.guide)).apply {
+                    setBase(found.segmentation?.maskFor(selection))
+                }
+            }
+            if (subjects === found) _editor.value = MaskEditorSession(photo, edit, viewModelScope)
+        }
+    }
+
+    /** Closes the editor, keeping the new outline when [apply] is true. */
+    fun finishEditing(apply: Boolean) {
+        val session = _editor.value ?: return
+        closeEditor()
+        val found = subjects ?: return
+        if (!apply || !session.changed) return
+        val edit = session.edit
+        found.edit = edit.takeIf { it.hasStrokes || it.refineEdges || it.feather > 0 }
+        subjectsChanged(found)
+    }
+
+    private fun closeEditor() {
+        _editor.value?.close()
+        _editor.value = null
     }
 
     fun updateSettings(change: (MeshSettings) -> MeshSettings) {
@@ -241,7 +433,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         val pixels = IntArray(photo.width * photo.height)
         photo.getPixels(pixels, 0, photo.width, 0, 0, photo.width, photo.height)
         val baked = TextureBaker.bake(pixels, photo.width, photo.height, mask)
-        val bitmap = Bitmap.createBitmap(photo.width, photo.height, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(photo.width, photo.height)
         bitmap.isPremultiplied = false
         bitmap.setPixels(baked, 0, photo.width, 0, 0, photo.width, photo.height)
         return ModelTexture(bitmap, TextureBaker.subjectRegion(mask))
