@@ -31,10 +31,15 @@ object AdaptiveMeshBuilder {
 
         var sum = 0f
         var count = 0
-        for (y in 0 until depth.height step 4) for (x in 0 until depth.width step 4) {
-            val u = x.toFloat() / (depth.width - 1)
-            val v = y.toFloat() / (depth.height - 1)
-            if (mask.sampleNormalized(u, v) >= maskThreshold) { sum += depth[x, y]; count++ }
+        for (y in 0 until depth.height step 4) {
+            for (x in 0 until depth.width step 4) {
+                val u = x.toFloat() / (depth.width - 1)
+                val v = y.toFloat() / (depth.height - 1)
+                if (mask.sampleNormalized(u, v) >= maskThreshold) {
+                    sum += depth[x, y]
+                    count++
+                }
+            }
         }
         val meanDepth = if (count == 0) 0.5f else sum / count
 
@@ -52,22 +57,38 @@ object AdaptiveMeshBuilder {
                 val py = -(v - centerV) * fit
                 val pz = (depth[x, y] - meanDepth) * depthScale
                 val index = positions.size / 3
-                positions.add(px); positions.add(py); positions.add(pz)
-                texCoords.add(u); texCoords.add(1f - v)
+                positions.add(px)
+                positions.add(py)
+                positions.add(pz)
+                texCoords.add(u)
+                texCoords.add(1f - v)
                 index
             }
         }
 
         fun addTriangle(ax: Int, ay: Int, bx: Int, by: Int, cx: Int, cy: Int) {
-            val ca = confidence(ax, ay); val cb = confidence(bx, by); val cc = confidence(cx, cy)
+            val ca = confidence(ax, ay)
+            val cb = confidence(bx, by)
+            val cc = confidence(cx, cy)
             if (ca < maskThreshold || cb < maskThreshold || cc < maskThreshold) return
-            val da = depth[ax, ay]; val db = depth[bx, by]; val dc = depth[cx, cy]
-            if (abs(da - db) > maxDepthJump || abs(da - dc) > maxDepthJump || abs(db - dc) > maxDepthJump) return
-            indices.add(vertex(ax, ay)); indices.add(vertex(bx, by)); indices.add(vertex(cx, cy))
+            val da = depth[ax, ay]
+            val db = depth[bx, by]
+            val dc = depth[cx, cy]
+            if (
+                abs(da - db) > maxDepthJump ||
+                abs(da - dc) > maxDepthJump ||
+                abs(db - dc) > maxDepthJump
+            ) return
+            indices.add(vertex(ax, ay))
+            indices.add(vertex(bx, by))
+            indices.add(vertex(cx, cy))
         }
 
         fun emitCell(x0: Int, y0: Int, x1: Int, y1: Int) {
-            val d00 = depth[x0, y0]; val d10 = depth[x1, y0]; val d01 = depth[x0, y1]; val d11 = depth[x1, y1]
+            val d00 = depth[x0, y0]
+            val d10 = depth[x1, y0]
+            val d01 = depth[x0, y1]
+            val d11 = depth[x1, y1]
             if (abs(d00 - d11) < abs(d10 - d01)) {
                 addTriangle(x0, y0, x0, y1, x1, y1)
                 addTriangle(x0, y0, x1, y1, x1, y0)
@@ -86,14 +107,16 @@ object AdaptiveMeshBuilder {
             var maxDepth = Float.NEGATIVE_INFINITY
             var foreground = 0
             var background = 0
-            var s = 0
-            while (s < samples.size) {
-                val x = samples[s]; val y = samples[s + 1]
+            var sampleIndex = 0
+            while (sampleIndex < samples.size) {
+                val x = samples[sampleIndex]
+                val y = samples[sampleIndex + 1]
                 val c = confidence(x, y)
                 if (c >= maskThreshold) foreground++ else background++
                 val d = depth[x, y]
-                minDepth = minOf(minDepth, d); maxDepth = maxOf(maxDepth, d)
-                s += 2
+                minDepth = minOf(minDepth, d)
+                maxDepth = maxOf(maxDepth, d)
+                sampleIndex += 2
             }
             if (foreground == 0) return
             val shouldSplit = level < 9 &&
@@ -115,6 +138,6 @@ object AdaptiveMeshBuilder {
             texCoords = texCoords.toFloatArray(),
             indices = indices.toIntArray(),
         )
-        return MeshMath.recalculateNormals(mesh)
+        return MeshCleanup.clean(mesh)
     }
 }
