@@ -31,11 +31,17 @@ class Engine:
     id: str
     name: str
     note: str
+    kind: str = "image"  # "image": a cut-out photo in; "photos": a set of photos in (a zip)
 
     def available(self) -> bool:
         return True
 
+    def why_not(self) -> Optional[str]:
+        """What to do when the engine isn't available, if it is known."""
+        return None
+
     def run(self, image: Path, work: Path, options: dict, progress: Progress) -> Path:
+        """Makes the model from [image] (a photos engine gets its zip of photos here) and returns the GLB file."""
         raise NotImplementedError
 
 
@@ -207,6 +213,9 @@ def load_engines(config_path: Optional[Path] = None) -> dict:
         if id not in ("sf3d", "triposr", "hunyuan3d") and isinstance(section, dict) and section.get("command"):
             engines.append(CommandEngine(id, section.get("name", id), section.get("note", ""), section["command"],
                                          int(section.get("timeout", 1800)), section.get("cwd")))
+    from photogrammetry import PhotogrammetryEngine  # noqa: PLC0415 (it needs this module loaded first)
+
+    engines.append(PhotogrammetryEngine())
     return {e.id: e for e in engines}
 
 

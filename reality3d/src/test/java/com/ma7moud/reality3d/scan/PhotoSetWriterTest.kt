@@ -66,4 +66,45 @@ class PhotoSetWriterTest {
         val cameras = String(entries["colmap/cameras.txt"]!!).lines().filter { it.startsWith("1 ") }
         assertEquals(listOf("1 PINHOLE 1920 1080 1400.000000 1400.000000 960.000000 540.000000"), cameras)
     }
+
+    private fun frames(count: Int) = List(count) { index ->
+        Keyframe(ByteArray(10) { (index * 10 + it).toByte() }, 1920, 1080, intrinsics, SyntheticScan.lookAt(0.4f * index, 0.3f, 0.4f, 0f, 0f, 0f))
+    }
+
+    private fun entriesOf(zip: ByteArray): Map<String, ByteArray> {
+        val entries = LinkedHashMap<String, ByteArray>()
+        ZipInputStream(ByteArrayInputStream(zip)).use { input ->
+            while (true) {
+                val entry = input.nextEntry ?: break
+                entries[entry.name] = input.readBytes()
+            }
+        }
+        return entries
+    }
+
+    @Test
+    fun theScanBoxTellsTheComputerWhereTheObjectStood() {
+        val box = ScanBox(centerX = 0.10f, bottomY = 0.80f, centerZ = -0.30f, size = 0.4f, floorY = 0.796f)
+        val json = String(entriesOf(PhotoSetWriter.write(frames(2), box))["cameras.json"]!!)
+        // The centre is the middle of the cube, not of its underside.
+        assertTrue(json, json.contains("\"box\": {\"center\": [0.100000, 1.000000, -0.300000], \"size\": 0.400000, \"floorY\": 0.796000}"))
+        val noTable = String(entriesOf(PhotoSetWriter.write(frames(2), ScanBox(0f, 0.5f, 0f, 0.2f, null)))["cameras.json"]!!)
+        assertTrue(noTable, noTable.contains("\"box\": {\"center\": [0.000000, 0.600000, 0.000000], \"size\": 0.200000}"))
+        assertTrue(!String(entriesOf(PhotoSetWriter.write(frames(2)))["cameras.json"]!!).contains("\"box\""))
+        // The frames still follow the box, and the file opens with "{" and closes with "}".
+        val text = String(entriesOf(PhotoSetWriter.write(frames(2), box))["cameras.json"]!!).trim()
+        assertTrue(text.startsWith("{") && text.endsWith("}"))
+        assertEquals(2, Regex("\"cameraToWorld\"").findAll(text).count())
+    }
+
+    @Test
+    fun writingToAStreamGivesTheSameFilesAsWritingBytes() {
+        val box = ScanBox(0f, 0f, 0f, 0.3f, 0f)
+        val out = java.io.ByteArrayOutputStream()
+        PhotoSetWriter.write(frames(3), box, out)
+        val streamed = entriesOf(out.toByteArray())
+        val bytes = entriesOf(PhotoSetWriter.write(frames(3), box))
+        assertEquals(bytes.keys, streamed.keys)
+        for ((name, content) in bytes) assertArrayEquals(name, content, streamed[name])
+    }
 }

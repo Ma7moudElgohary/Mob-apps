@@ -79,7 +79,7 @@ internal fun FullAiCard(
                         TextButton(onClick = { setup = true }) { Text("Change") }
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        server.engines.filter { it.available }.forEach { engine ->
+                        server.engines.filter { it.available && it.kind == "image" }.forEach { engine ->
                             FilterChip(
                                 selected = remote.settings.engine == engine.id,
                                 onClick = { onEngine(engine.id) },
@@ -91,7 +91,7 @@ internal fun FullAiCard(
                     server.engines.firstOrNull { it.id == remote.settings.engine }?.note?.takeIf { it.isNotBlank() }?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    val missing = server.engines.filter { !it.available }.map { it.name }
+                    val missing = server.engines.filter { !it.available && it.kind == "image" }.map { it.name }
                     if (missing.isNotEmpty()) {
                         Text(
                             "Not set up on the computer: ${missing.joinToString()}. See engines.example.toml.",
@@ -103,7 +103,7 @@ internal fun FullAiCard(
                     if (progress == null) {
                         Button(
                             onClick = onMake,
-                            enabled = !busy && server.engines.any { it.available && it.id == remote.settings.engine },
+                            enabled = !busy && server.engines.any { it.available && it.kind == "image" && it.id == remote.settings.engine },
                             modifier = Modifier.fillMaxWidth(),
                         ) { Text("Make full 3D model") }
                     } else {
@@ -128,8 +128,9 @@ internal fun FullAiCard(
     }
 }
 
+/** Asks for the address the Reality3D server shows when it starts, and its access code if one is set. */
 @Composable
-private fun ServerDialog(settings: RemoteSettings, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
+internal fun ServerDialog(settings: RemoteSettings, message: String? = null, onDismiss: () -> Unit, onSave: (String, String) -> Unit) {
     var url by remember { mutableStateOf(settings.url.substringAfter("http://")) }
     var token by remember { mutableStateOf(settings.token) }
     AlertDialog(
@@ -138,8 +139,8 @@ private fun ServerDialog(settings: RemoteSettings, onDismiss: () -> Unit, onSave
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Run the Reality3D server on the computer and type the address it shows. The phone and the computer " +
-                        "must be on the same Wi-Fi.",
+                    message ?: ("Run the Reality3D server on the computer and type the address it shows. The phone and the computer " +
+                        "must be on the same Wi-Fi."),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(value = url, onValueChange = { url = it }, singleLine = true, label = { Text("Address, e.g. 192.168.1.20:8765") })

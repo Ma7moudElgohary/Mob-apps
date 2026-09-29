@@ -16,14 +16,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 
 from engines import Engine, EngineError, load_engines
 
-VERSION = "1.0"
+VERSION = "1.1"
 MAX_UPLOAD = 20 * 1024 * 1024
+MAX_PHOTOS_UPLOAD = int(os.environ.get("R3D_MAX_UPLOAD_MB", 2048)) * 1024 * 1024
 MAX_SIDE = 2048
 KEEP_SECONDS = 3600
 MAX_JOBS = 50
@@ -40,10 +41,12 @@ class Job:
     engine: str
     folder: Path
     options: dict
-    status: str = "queued"  # queued, running, done, failed
+    status: str = "queued"  # queued, running, done, failed, cancelled
     progress: Optional[float] = None
     message: Optional[str] = None
     result: Optional[Path] = None
+    input: Optional[Path] = None
+    cancel: threading.Event = field(default_factory=threading.Event)
     created: float = field(default_factory=time.time)
 
 
@@ -58,15 +61,35 @@ class Worker:
         self.root = Path(tempfile.mkdtemp(prefix="reality3d_"))
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def submit(self, engine: Engine, image: Image.Image, options: dict) -> Job:
+    def create(self, engine: Engine, options: dict) -> Job:
+        """A job with its own folder, not started yet: the caller puts the input there and calls start()."""
         self._forget_old()
         job = Job(uuid.uuid4().hex, engine.id, self.root / uuid.uuid4().hex, options)
         job.folder.mkdir()
-        image.save(job.folder / "input.png")
         with self.lock:
             self.jobs[job.id] = job
-        self.queue.put(job.id)
         return job
+
+    def start(self, job: Job) -> None:
+        self.queue.put(job.id)
+
+    def submit(self, engine: Engine, image: Image.Image, options: dict) -> Job:
+        job = self.create(engine, options)
+        job.input = job.folder / "input.png"
+        image.save(job.input)
+        self.start(job)
+        return job
+
+    def discard(self, job: Job) -> None:
+        with self.lock:
+            self.jobs.pop(job.id, None)
+        shutil.rmtree(job.folder, ignore_errors=True)
+
+    def cancel(self, job: Job) -> None:
+        """Stops a job: at once when it is waiting, as soon as the engine notices when it is running."""
+        job.cancel.set()
+        if job.status == "queued":
+            job.status, job.message = "cancelled", "Cancelled"
 
     def get(self, job_id: str) -> Optional[Job]:
         with self.lock:
@@ -75,7 +98,7 @@ class Worker:
     def _loop(self):
         while True:
             job = self.get(self.queue.get())
-            if job is None:
+            if job is None or job.status == "cancelled":
                 continue
             job.status = "running"
             engine = self.engines[job.engine]
@@ -87,12 +110,16 @@ class Worker:
                 job.message = message
 
             try:
-                job.result = engine.run(job.folder / "input.png", job.folder, job.options, progress)
+                job.result = engine.run(job.input, job.folder, {**job.options, "_cancel": job.cancel}, progress)
                 job.status, job.progress, job.message = "done", 1.0, None
                 log(f"{engine.name}: done in {time.time() - started:.0f} s")
             except EngineError as e:
-                job.status, job.message = "failed", str(e)
-                log(f"{engine.name}: failed: {e}")
+                if job.cancel.is_set():
+                    job.status, job.message = "cancelled", "Cancelled"
+                    log(f"{engine.name}: cancelled")
+                else:
+                    job.status, job.message = "failed", str(e)
+                    log(f"{engine.name}: failed: {e}")
             except Exception as e:  # An engine's own error: report it rather than dying.
                 job.status, job.message = "failed", f"{engine.name} failed: {e.__class__.__name__}: {e}"
                 log(f"{engine.name}: failed: {e.__class__.__name__}: {e}")
@@ -124,8 +151,15 @@ def create_app(engines: Optional[dict] = None, token: Optional[str] = None) -> F
             "name": "Reality3D server",
             "version": VERSION,
             "authRequired": bool(token),
-            "engines": [{"id": e.id, "name": e.name, "note": e.note, "available": e.available()} for e in engines.values()],
+            "engines": [_describe(e) for e in engines.values()],
         }
+
+    def _describe(engine: Engine) -> dict:
+        available = engine.available()
+        described = {"id": engine.id, "name": engine.name, "note": engine.note, "available": available, "kind": engine.kind}
+        if not available and engine.why_not():
+            described["why"] = engine.why_not()
+        return described
 
     @app.post("/v1/jobs", status_code=202, dependencies=[Depends(authorized)])
     async def create_job(
@@ -135,7 +169,7 @@ def create_app(engines: Optional[dict] = None, token: Optional[str] = None) -> F
         faces: int = Form(20000),
     ):
         chosen = engines.get(engine)
-        if chosen is None:
+        if chosen is None or chosen.kind != "image":
             raise HTTPException(400, f"Unknown engine '{engine}'")
         if not chosen.available():
             raise HTTPException(409, f"{chosen.name} isn't set up on this computer")
@@ -151,6 +185,46 @@ def create_app(engines: Optional[dict] = None, token: Optional[str] = None) -> F
         picture.thumbnail((MAX_SIDE, MAX_SIDE))
         options = {"texture_size": min(max(texture_size, 256), 4096), "faces": min(max(faces, 1000), 500000)}
         job = worker.submit(chosen, picture, options)
+        return {"id": job.id, "status": job.status}
+
+    @app.post("/v1/photo-jobs", status_code=202, dependencies=[Depends(authorized)])
+    async def create_photo_job(request: Request, engine: str = "photogrammetry", quality: str = "standard", mode: str = "object"):
+        """The body is a zip of photos (and, from a Reality3D scan, cameras.json); the options are in the query."""
+        chosen = engines.get(engine)
+        if chosen is None or chosen.kind != "photos":
+            raise HTTPException(400, f"Unknown engine '{engine}'")
+        if not chosen.available():
+            raise HTTPException(409, chosen.why_not() or f"{chosen.name} isn't set up on this computer")
+        job = worker.create(chosen, {"quality": quality, "mode": "scene" if mode == "scene" else "object"})
+        target = job.folder / "photos.zip"
+        received = 0
+        try:
+            with open(target, "wb") as out:
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > MAX_PHOTOS_UPLOAD:
+                        raise HTTPException(413, "The photos are too big; send fewer or smaller ones")
+                    out.write(chunk)
+        except HTTPException:
+            worker.discard(job)
+            raise
+        except Exception:  # The phone gave up half way.
+            worker.discard(job)
+            raise HTTPException(400, "The photos didn't arrive completely") from None
+        if received == 0:
+            worker.discard(job)
+            raise HTTPException(400, "No photos were sent")
+        job.input = target
+        log(f"{chosen.name}: {received / 1e6:.0f} MB of photos received")
+        worker.start(job)
+        return {"id": job.id, "status": job.status}
+
+    @app.delete("/v1/jobs/{job_id}", dependencies=[Depends(authorized)])
+    def cancel_job(job_id: str):
+        job = worker.get(job_id)
+        if job is None:
+            raise HTTPException(404, "No such job (the server may have restarted)")
+        worker.cancel(job)
         return {"id": job.id, "status": job.status}
 
     @app.get("/v1/jobs/{job_id}", dependencies=[Depends(authorized)])

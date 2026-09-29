@@ -11,7 +11,8 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engines import CommandEngine, PreviewEngine  # noqa: E402
+import server  # noqa: E402
+from engines import CommandEngine, Engine, EngineError, PreviewEngine  # noqa: E402
 from server import create_app  # noqa: E402
 
 
@@ -27,7 +28,7 @@ def cutout(size=(200, 150)) -> bytes:
 def wait(client, job_id, headers=None):
     for _ in range(200):
         status = client.get(f"/v1/jobs/{job_id}", headers=headers).json()
-        if status["status"] in ("done", "failed"):
+        if status["status"] in ("done", "failed", "cancelled"):
             return status
         time.sleep(0.05)
     raise AssertionError("the job never finished")
@@ -117,3 +118,108 @@ def test_command_engines_run_the_configured_tool(tmp_path):
     job = client.post("/v1/jobs", files={"image": ("cutout.png", cutout(), "image/png")}, data={"engine": "broken"})
     status = wait(client, job.json()["id"])
     assert status["status"] == "failed" and "out of GPU memory" in status["message"]
+
+
+class FakePhotos(Engine):
+    """Stands in for photogrammetry: counts the photos in the zip and writes a GLB-looking file."""
+
+    def __init__(self, work_seconds: float = 0.0, ready: bool = True):
+        super().__init__("photogrammetry", "Photos → 3D", "Needs photos.", kind="photos")
+        self.work_seconds, self.ready, self.seen = work_seconds, ready, None
+
+    def available(self) -> bool:
+        return self.ready
+
+    def why_not(self):
+        return None if self.ready else "Run  pip install pycolmap"
+
+    def run(self, photos, work, options, progress):
+        import zipfile
+
+        self.seen = {k: v for k, v in options.items() if k != "_cancel"}
+        cancel = options["_cancel"]
+        progress(0.3, "Working on the photos")
+        deadline = time.monotonic() + self.work_seconds
+        while time.monotonic() < deadline:
+            if cancel.is_set():
+                raise EngineError("Cancelled")
+            time.sleep(0.02)
+        with zipfile.ZipFile(photos) as zf:
+            count = len(zf.namelist())
+        out = work / "model.glb"
+        out.write_bytes(b"glTF" + str(count).encode())
+        return out
+
+
+def photo_zip(count=3) -> bytes:
+    import zipfile
+
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as zf:
+        for i in range(count):
+            zf.writestr(f"images/{i}.jpg", b"jpeg")
+    return data.getvalue()
+
+
+def test_photo_jobs_take_a_zip_and_bring_back_the_model():
+    engine = FakePhotos()
+    client = TestClient(create_app({"photogrammetry": engine, "preview": PreviewEngine()}, token=""))
+    health = {e["id"]: e for e in client.get("/v1/health").json()["engines"]}
+    assert health["photogrammetry"]["kind"] == "photos" and health["preview"]["kind"] == "image"
+    job = client.post("/v1/photo-jobs?quality=high&mode=scene", content=photo_zip(5), headers={"Content-Type": "application/zip"})
+    assert job.status_code == 202
+    assert wait(client, job.json()["id"])["status"] == "done"
+    assert client.get(f"/v1/jobs/{job.json()['id']}/result").content == b"glTF5"
+    assert engine.seen == {"quality": "high", "mode": "scene"}
+    other = client.post("/v1/photo-jobs", content=photo_zip(), headers={"Content-Type": "application/zip"})
+    assert wait(client, other.json()["id"])["status"] == "done"
+    assert engine.seen == {"quality": "standard", "mode": "object"}
+
+
+def test_an_engine_that_isnt_ready_says_what_to_do():
+    client = TestClient(create_app({"photogrammetry": FakePhotos(ready=False)}, token=""))
+    health = client.get("/v1/health").json()["engines"][0]
+    assert health["available"] is False and "pip install pycolmap" in health["why"]
+    refused = client.post("/v1/photo-jobs", content=photo_zip(), headers={"Content-Type": "application/zip"})
+    assert refused.status_code == 409 and "pip install pycolmap" in refused.json()["detail"]
+
+
+def test_photo_engines_and_cutout_engines_are_not_mixed_up():
+    client = TestClient(create_app({"photogrammetry": FakePhotos(), "preview": PreviewEngine()}, token=""))
+    assert client.post("/v1/photo-jobs?engine=preview", content=photo_zip()).status_code == 400
+    assert client.post("/v1/photo-jobs?engine=nope", content=photo_zip()).status_code == 400
+    files = {"image": ("cutout.png", cutout(), "image/png")}
+    assert client.post("/v1/jobs", files=files, data={"engine": "photogrammetry"}).status_code == 400
+
+
+def test_empty_and_oversized_photo_uploads_are_refused(monkeypatch):
+    client = TestClient(create_app({"photogrammetry": FakePhotos()}, token=""))
+    assert client.post("/v1/photo-jobs", content=b"").status_code == 400
+    monkeypatch.setattr(server, "MAX_PHOTOS_UPLOAD", 100)
+    assert client.post("/v1/photo-jobs", content=b"x" * 500).status_code == 413
+
+
+def test_the_access_code_guards_photo_jobs_and_cancelling():
+    client = TestClient(create_app({"photogrammetry": FakePhotos(work_seconds=5)}, token="s3cret"))
+    assert client.post("/v1/photo-jobs", content=photo_zip()).status_code == 401
+    ok = client.post("/v1/photo-jobs", content=photo_zip(), headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code == 202
+    assert client.delete(f"/v1/jobs/{ok.json()['id']}").status_code == 401
+    assert client.delete(f"/v1/jobs/{ok.json()['id']}", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_a_running_photo_job_and_a_waiting_one_can_be_cancelled():
+    client = TestClient(create_app({"photogrammetry": FakePhotos(work_seconds=30)}, token=""))
+    first = client.post("/v1/photo-jobs", content=photo_zip(), headers={"Content-Type": "application/zip"}).json()["id"]
+    second = client.post("/v1/photo-jobs", content=photo_zip(), headers={"Content-Type": "application/zip"}).json()["id"]
+    for _ in range(100):
+        if client.get(f"/v1/jobs/{first}").json()["status"] == "running":
+            break
+        time.sleep(0.02)
+    assert client.get(f"/v1/jobs/{second}").json()["status"] == "queued"
+    assert client.delete(f"/v1/jobs/{second}").json()["status"] == "cancelled"
+    assert client.delete(f"/v1/jobs/{first}").status_code == 200
+    status = wait(client, first)
+    assert status["status"] == "cancelled"
+    assert client.get(f"/v1/jobs/{first}/result").status_code == 409
+    assert client.delete("/v1/jobs/unknown").status_code == 404

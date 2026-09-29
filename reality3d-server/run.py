@@ -46,8 +46,8 @@ def local_addresses() -> list:
     return usable_addresses(candidates)
 
 
-def banner(addresses, port: int, needs_code: bool) -> str:
-    lines = ["", "Reality3D server is running.", "", "In the app: open a photo, then", "  AI Full 3D on your computer > Connect to your computer, and type:", ""]
+def banner(addresses, port: int, needs_code: bool, photos: str = "") -> str:
+    lines = ["", "Reality3D server is running.", "", "In the app: 3D from many photos (or open a photo, then", "  AI Full 3D on your computer) > Connect to your computer, and type:", ""]
     if addresses:
         lines += [f"      {address}:{port}" for address in addresses]
         if len(addresses) > 1:
@@ -55,9 +55,26 @@ def banner(addresses, port: int, needs_code: bool) -> str:
     else:
         lines += [f"      <this computer's address>:{port}", "", "  (Couldn't find it: run ipconfig, and use the IPv4 address of your Wi-Fi.)"]
     lines += ["", "The phone and this computer must be on the same Wi-Fi."]
+    if photos:
+        lines += ["", photos]
     lines += ["If Windows asks about the firewall, choose Allow (Private networks)."]
     lines += ["An access code is needed in the app." if needs_code else "No access code is set (set R3D_TOKEN to ask for one).", "", "Press Ctrl+C to stop.", ""]
     return "\n".join(lines)
+
+
+def photo_builder_note() -> str:
+    """One line on whether 'Photos → 3D' works here: what to do if not, else that it is ready."""
+    try:
+        from engines import load_engines
+
+        engine = load_engines().get("photogrammetry")
+    except Exception:  # The banner must never stop the server from starting.
+        return ""
+    if engine is None:
+        return ""
+    if engine.available():
+        return "3D from many photos is ready (the first time, it downloads a small helper program)."
+    return "3D from many photos isn't available: " + (engine.why_not() or "something is missing.")
 
 
 def main():
@@ -66,7 +83,7 @@ def main():
     from server import app
 
     port = int(os.environ.get("R3D_PORT", DEFAULT_PORT))
-    print(banner(local_addresses(), port, bool(os.environ.get("R3D_TOKEN"))), flush=True)
+    print(banner(local_addresses(), port, bool(os.environ.get("R3D_TOKEN")), photo_builder_note()), flush=True)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 
 

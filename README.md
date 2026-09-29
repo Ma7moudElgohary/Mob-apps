@@ -4,10 +4,33 @@ Native Android experiments built with Kotlin, Jetpack Compose, on-device AI and 
 
 ## Reality3D
 
-`reality3d/` makes 3D models of real objects on the phone: by walking around them with ARCore, from a
-single photo, or from a photo sent to an image-to-3D AI on your own computer. Models can be measured,
-compared with the photo, saved to **My models**, seen at real size in the room with AR, and exported as
-GLB, STL, OBJ, PLY or a game-ready Unreal pack.
+`reality3d/` makes 3D models of real objects: by walking around them with ARCore, from **many photos worked
+out on your own computer** (photogrammetry, the most detailed), from a single photo, or from a photo sent to an
+image-to-3D AI on your computer. Models can be measured, compared with the photo, saved to **My models**, seen at
+real size in the room with AR, opened from a .glb another app made, and exported as GLB, STL, OBJ, PLY or a
+game-ready Unreal pack.
+
+### 3D from many photos (on your computer)
+
+Photogrammetry, the way RealityScan, KIRI Engine and Polycam make their best models, is a set of ordinary still
+photos from all around the object, worked out by a real solver. A phone without a depth sensor can't do that well
+alone (ARCore's depth on the Galaxy S26 Ultra is 160 × 90), so the phone takes the photos and
+[`reality3d-server`](reality3d-server/) does the work: COLMAP works out where each photo was taken, OpenMVS builds
+the dense points, the mesh and the texture. No graphics card is needed; it takes minutes.
+
+- **From a scan:** tap **Build on my computer · best quality** while scanning (12 photos or more, 40 or more is
+  better). The photos go with ARCore's camera positions and the scan box, so the model comes back **upright, in real
+  centimetres, cut down to the object with the table removed**, with its texture, and lands in the scan's result
+  screen and in **My models**.
+- **From the gallery:** **3D from many photos** on the home screen takes photos from the normal camera (full
+  resolution, the lens details kept), for one object or a whole scene, at fast, standard or high quality. The model is
+  upright but its size is unknown until you set a real length.
+- **Other apps:** **Open a .glb** brings in a model made by KIRI Engine, Scaniverse, Polycam or RealityScan, to
+  measure, view in AR, export or keep.
+
+The server downloads OpenMVS the first time (checked against a known checksum), shows the job's progress and can be
+told to stop. Tested on made-up photos of a known object, every side came back within 5% of its real size (the height, 0.1795 m
+for 0.18 m, within 1%).
 
 ### 360° scan (ARCore)
 
@@ -86,6 +109,7 @@ and import notes) and, for scans, **Photos** (the scan photos with camera poses 
 
 ### Tests
 
+The photo builder is tested end to end on made-up photos with a known answer (size, upright pose, table removed).
 JVM tests cover the mesh builder and simplifier, depth input and refinement, exporters and the GLB reader,
 segmentation, the mask editor and Segment Anything's prompt and mask handling, the viewer's picking and framing, the
 Gemini Nano parser, scan fusion (synthetic scans must fuse into a closed surface within about 1 mm, also from sparse

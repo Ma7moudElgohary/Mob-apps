@@ -81,6 +81,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ma7moud.reality3d.export.ExportFormat
+import com.ma7moud.reality3d.remote.RemoteSettings
 import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.preview.PreviewModel
@@ -112,6 +113,8 @@ private val Warning = Color(0xFFFFC857)
 @Composable
 fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Unit, onViewInAr: (PreviewModel) -> Unit = {}) {
     val screen by viewModel.screen.collectAsStateWithLifecycle()
+    val ask by viewModel.needsComputer.collectAsStateWithLifecycle()
+    val notice by viewModel.message.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -140,7 +143,34 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (val state = screen) {
             ScanScreenState.Scanning -> viewModel.engine?.let {
-                CameraScan(it, onBuild = viewModel::build, onRetry = { retry() }, onClose = { close() }, report = viewModel::scanReport)
+                CameraScan(
+                    it,
+                    onBuild = viewModel::build,
+                    onComputer = viewModel::buildOnComputer,
+                    onRetry = { retry() },
+                    onClose = { close() },
+                    report = viewModel::scanReport,
+                    notice = notice?.takeIf { (_, isError) -> isError }?.first,
+                )
+                if (ask != null) {
+                    ServerDialog(RemoteSettings(), ask, onDismiss = viewModel::dismissComputer, onSave = viewModel::saveComputer)
+                }
+            }
+            is ScanScreenState.Remote -> Centered(onClose = null) {
+                KeepScreenOn(true)
+                Text("Building on your computer", style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(8.dp))
+                val fraction = state.fraction
+                if (fraction != null) LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth(0.7f))
+                else LinearProgressIndicator(Modifier.fillMaxWidth(0.7f))
+                Text(state.label, textAlign = TextAlign.Center)
+                Text(
+                    "This takes a few minutes. Keep this screen open; it stays awake, and the model appears here when it is ready.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = viewModel::cancelComputer) { Text("Cancel") }
             }
             is ScanScreenState.Building -> Centered(onClose = null) {
                 CircularProgressIndicator()
@@ -153,7 +183,7 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
                 viewModel,
                 useGlViewer,
                 onAddViews = viewModel::addMoreViews,
-                onViewInAr = { onViewInAr(PreviewModel(state.capture.mesh, null, 1f, "Your scan")) },
+                onViewInAr = { onViewInAr(PreviewModel(state.capture.mesh, state.capture.texture, state.capture.metersPerUnit, "Your scan")) },
                 onScanAgain = { retry() },
                 onDone = { close() },
             )
@@ -224,7 +254,15 @@ private fun Centered(onClose: (() -> Unit)?, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit, onClose: () -> Unit, report: () -> String) {
+private fun CameraScan(
+    engine: ScanEngine,
+    onBuild: () -> Unit,
+    onComputer: () -> Unit,
+    onRetry: () -> Unit,
+    onClose: () -> Unit,
+    report: () -> String,
+    notice: String?,
+) {
     val status by engine.status.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, engine) {
@@ -313,7 +351,15 @@ private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> U
             }
             GuidanceCard(status, rememberStableTip(guidance))
             Spacer(Modifier.weight(1f))
-            ScanPanel(status, engine, onBuild, onRetry, onRestart = { restart() })
+            notice?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Panel).padding(12.dp),
+                )
+            }
+            ScanPanel(status, engine, onBuild, onComputer, onRetry, onRestart = { restart() })
         }
         if (showTips) {
             TipsCard(onDone = {
@@ -441,7 +487,7 @@ private val TIPS = listOf(
 private val SIZE_PRESETS = listOf("Small · in a hand" to 0.2f, "Medium · shoebox" to 0.4f, "Large · a chair" to 0.8f)
 
 @Composable
-private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit, onRestart: () -> Unit) {
+private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Unit, onComputer: () -> Unit, onRetry: () -> Unit, onRestart: () -> Unit) {
     when (status.phase) {
         ScanPhase.READY -> Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Panel).padding(16.dp),
@@ -505,11 +551,22 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
                 Button(
                     onClick = onBuild,
                     enabled = canBuild,
-                    modifier = Modifier.weight(0.6f).height(56.dp),
+                    modifier = Modifier.weight(0.6f).height(52.dp),
                     colors = if (enough) ButtonDefaults.buttonColors(containerColor = Covered, contentColor = Color(0xFF07130D)) else ButtonDefaults.buttonColors(),
                 ) { Text("Build model", style = MaterialTheme.typography.titleMedium) }
             }
             if (!canBuild) Text("Go around at least once before building.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+            FilledTonalButton(
+                onClick = onComputer,
+                enabled = status.photos >= MIN_PHOTOS_FOR_COMPUTER,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) { Text("Build on my computer · best quality") }
+            when {
+                status.photos < MIN_PHOTOS_FOR_COMPUTER ->
+                    Text("Needs at least $MIN_PHOTOS_FOR_COMPUTER photos: keep going around.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+                status.photos < GOOD_PHOTOS_FOR_COMPUTER ->
+                    Text("$GOOD_PHOTOS_FOR_COMPUTER or more photos give a cleaner model.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+            }
         }
         ScanPhase.FAILED -> Button(onClick = onRetry, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Try again") }
         else -> Unit
@@ -517,6 +574,8 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
 }
 
 private const val MIN_COVERAGE = 0.3f
+private const val MIN_PHOTOS_FOR_COMPUTER = 12
+private const val GOOD_PHOTOS_FOR_COMPUTER = 40
 
 /** Top-down map of the covered directions: outer ring low views, inner rings higher, the centre from above. */
 @Composable
@@ -629,27 +688,31 @@ private fun ScanResult(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Your scan", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+            Text(if (capture.fromPhotos) "Model from your photos" else "Your scan", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.weight(1f))
             TextButton(onClick = onDone) { Text("Done") }
         }
         ViewerCard(
             mesh = mesh,
-            texture = null,
+            texture = capture.texture,
             photo = null,
             useGlViewer = useGlViewer,
-            metersPerUnit = 1f,
-            sizeKnown = true,
+            metersPerUnit = capture.metersPerUnit,
+            sizeKnown = capture.sizeKnown,
             onSetRealLength = null,
             onScreenshot = { shareScreenshot(it) },
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                "Size: ${oneDecimal(width)} × ${oneDecimal(depth)} × ${oneDecimal(height)} cm",
+                "Size: ${if (capture.sizeKnown) "" else "≈ "}${oneDecimal(width)} × ${oneDecimal(depth)} × ${oneDecimal(height)} cm",
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
-                "Width × depth × height, measured by ARCore. From ${capture.keyframes.size} photos.",
+                when {
+                    !capture.fromPhotos -> "Width × depth × height, measured by ARCore. From ${capture.keyframes.size} photos."
+                    capture.sizeKnown -> "Width × depth × height, in real size from ARCore's positions. Built from ${capture.keyframes.size} photos on your computer."
+                    else -> "Built from ${capture.keyframes.size} photos on your computer. The real size isn't known: open it in My models and set a real length."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

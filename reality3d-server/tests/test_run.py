@@ -29,6 +29,13 @@ def test_the_banner_shows_what_to_type_and_what_to_allow():
     several = run.banner(["192.168.1.20", "10.0.0.7"], 9000, needs_code=False)
     assert "192.168.1.20:9000" in several and "10.0.0.7:9000" in several and "Several addresses" in several
     assert "ipconfig" in run.banner([], 8765, needs_code=False)
+    assert "3D from many photos is ready" in run.banner(["192.168.1.20"], 8765, needs_code=False, photos="3D from many photos is ready (...)")
+    assert "many photos" not in run.banner(["192.168.1.20"], 8765, needs_code=False).split("In the app")[1].split("type:")[1]
+
+
+def test_the_banner_tells_whether_photos_can_be_turned_into_models():
+    note = run.photo_builder_note()
+    assert note.startswith("3D from many photos")
 
 
 def test_windows_paths_keep_their_backslashes_and_spaces():

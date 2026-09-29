@@ -1,6 +1,7 @@
 package com.ma7moud.reality3d.scan
 
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.util.Locale
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -13,8 +14,15 @@ import kotlin.math.sqrt
  */
 object PhotoSetWriter {
 
-    fun write(keyframes: List<Keyframe>): ByteArray {
+    /** The zip as bytes; [box] is where the object stood, which the computer's photo builder uses to keep to it. */
+    fun write(keyframes: List<Keyframe>, box: ScanBox? = null): ByteArray {
         val output = ByteArrayOutputStream(keyframes.sumOf { it.jpeg.size + 128 } + 64 * 1024)
+        write(keyframes, box, output)
+        return output.toByteArray()
+    }
+
+    /** The same zip, written to [output] as it is made (so a big set never has to sit in memory). */
+    fun write(keyframes: List<Keyframe>, box: ScanBox?, output: OutputStream) {
         ZipOutputStream(output).use { zip ->
             // JPEGs are stored as they are: compressing them again only costs time.
             fun entry(name: String, bytes: ByteArray, stored: Boolean = false) {
@@ -30,19 +38,24 @@ object PhotoSetWriter {
                 zip.closeEntry()
             }
             keyframes.forEachIndexed { index, frame -> entry("images/${imageName(index)}", frame.jpeg, stored = true) }
-            entry("cameras.json", camerasJson(keyframes).toByteArray(Charsets.UTF_8))
+            entry("cameras.json", camerasJson(keyframes, box).toByteArray(Charsets.UTF_8))
             entry("colmap/cameras.txt", colmapCameras(keyframes).toByteArray(Charsets.US_ASCII))
             entry("colmap/images.txt", colmapImages(keyframes).toByteArray(Charsets.US_ASCII))
             entry("colmap/points3D.txt", "# Empty: triangulate with the known poses.\n".toByteArray(Charsets.US_ASCII))
             entry("README.txt", README.toByteArray(Charsets.UTF_8))
         }
-        return output.toByteArray()
     }
 
     fun imageName(index: Int) = String.format(Locale.ROOT, "frame_%03d.jpg", index)
 
-    internal fun camerasJson(keyframes: List<Keyframe>): String = buildString {
+    internal fun camerasJson(keyframes: List<Keyframe>, box: ScanBox? = null): String = buildString {
         append("{\n  \"generator\": \"Reality3D\",\n  \"units\": \"meters\",\n")
+        if (box != null) {
+            append("  \"box\": {\"center\": [").append(number(box.centerX)).append(", ").append(number(box.centerY)).append(", ")
+            append(number(box.centerZ)).append("], \"size\": ").append(number(box.size))
+            box.floorY?.let { append(", \"floorY\": ").append(number(it)) }
+            append("},\n")
+        }
         append("  \"convention\": \"cameraToWorld is a column-major 4x4 matrix (ARCore/OpenGL): +X right, +Y up, camera looks down -Z; world +Y is up\",\n")
         append("  \"frames\": [\n")
         keyframes.forEachIndexed { index, frame ->

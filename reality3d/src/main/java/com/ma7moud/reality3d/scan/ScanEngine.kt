@@ -2,6 +2,7 @@ package com.ma7moud.reality3d.scan
 
 import android.app.Activity
 import android.content.Context
+import android.graphics.Bitmap
 import android.view.View
 import com.ma7moud.reality3d.mesh.Mesh3D
 import com.ma7moud.reality3d.quality.QualityReport
@@ -35,8 +36,23 @@ class ScanStatus(
     }
 }
 
-/** A finished scan: the model, the photos it was coloured from, and how good the capture was. */
-class ScanCapture(val mesh: Mesh3D, val keyframes: List<Keyframe>, val quality: QualityReport)
+/**
+ * A finished scan: the model, the photos it was coloured from, and how good the capture was. A model built from
+ * the photos on the computer comes with its [texture]; [sizeKnown] is false when only its shape is real.
+ */
+class ScanCapture(
+    val mesh: Mesh3D,
+    val keyframes: List<Keyframe>,
+    val quality: QualityReport,
+    val texture: Bitmap? = null,
+    val metersPerUnit: Float = 1f,
+    val sizeKnown: Boolean = true,
+    /** Built from the photos by the computer's photo builder, not by this phone. */
+    val fromPhotos: Boolean = false,
+)
+
+/** The photos of a scan so far and where the object stood, for building the model on a computer. */
+class PhotoSet(val keyframes: List<Keyframe>, val box: ScanBox?)
 
 /** A 360° scanning session with its own camera view. */
 interface ScanEngine {
@@ -63,6 +79,9 @@ interface ScanEngine {
     fun pause()
 
     suspend fun build(progress: (String) -> Unit): ScanCapture
+
+    /** The photos taken so far, once the last one is stored; null when there are none. */
+    suspend fun photoSet(): PhotoSet? = null
 
     /** Releases the camera. The engine can't be used afterwards. */
     fun close()

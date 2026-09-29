@@ -15,13 +15,22 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ma7moud.reality3d.MainActivity
 import com.ma7moud.reality3d.scan.CoachTip
 import com.ma7moud.reality3d.scan.CoverageTracker
+import com.ma7moud.reality3d.Reality3DApplication
+import com.ma7moud.reality3d.project.ProjectKind
+import com.ma7moud.reality3d.remote.RemoteSettings
+import com.ma7moud.reality3d.remote.RemoteSettingsStore
 import com.ma7moud.reality3d.scan.Keyframe
+import com.ma7moud.reality3d.scan.PhotoSet
+import com.ma7moud.reality3d.scan.ScanBox
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanEngineFactory
@@ -31,11 +40,13 @@ import com.ma7moud.reality3d.scan.ScanReconstructor
 import com.ma7moud.reality3d.scan.ScanStatus
 import com.ma7moud.reality3d.scan.ScanSupport
 import com.ma7moud.reality3d.scan.SyntheticScan
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -110,6 +121,11 @@ internal class FakeScanEngine : ScanEngine {
         val keyframes = poses.take(6).map { Keyframe(ByteArray(64) { i -> i.toByte() }, 320, 240, SyntheticScan.colorIntrinsics, it) }
         val coverage = _status.value.coverage
         ScanCapture(mesh, keyframes, ScanQuality.assess(coverage, keyframes.size, 73, 0.7f))
+    }
+
+    override suspend fun photoSet(): PhotoSet {
+        val poses = SyntheticScan.ringPoses().take(6)
+        return PhotoSet(poses.map { Keyframe(ByteArray(64) { i -> i.toByte() }, 320, 240, SyntheticScan.colorIntrinsics, it) }, ScanBox(0.1f, 0.8f, -0.3f, 0.4f, 0.796f))
     }
 
     override fun close() {
@@ -339,5 +355,85 @@ class ScanSmokeTest {
         compose.onNodeWithText("Close").performClick()
         waitForText("Start 360° scan")
         assertTrue(engine.closed)
+    }
+
+    private fun startScanning() {
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("Start scan")
+        compose.onNodeWithText("Start scan").performClick()
+        waitForText("Covered 60%")
+    }
+
+    @Test
+    fun theScansPhotosBecomeAModelOnTheComputerWithItsRealSize() {
+        FakeRemote.reset()
+        startScanning()
+        compose.onNodeWithText("40 or more photos give a cleaner model.").assertExists()
+        compose.onNodeWithText("Build on my computer · best quality").assertIsEnabled().performClick()
+
+        // The computer isn't known yet: the app asks for its address, then goes on by itself.
+        waitForText("Your computer")
+        compose.onNode(hasSetTextAction() and hasText("Address, e.g. 192.168.1.20:8765")).performTextInput("192.168.1.20:8765")
+        compose.onNodeWithText("Save and connect").performClick()
+        waitForText("Model from your photos")
+
+        assertEquals(1, FakeRemote.photoBuilds)
+        val photos = FakeRemote.lastPhotos
+        assertEquals(6, photos.keys.count { it.startsWith("images/") })
+        val cameras = String(photos.getValue("cameras.json"))
+        assertTrue(cameras, cameras.contains("\"box\": {\"center\": [0.100000, 1.000000, -0.300000], \"size\": 0.400000, \"floorY\": 0.796000}"))
+        // Built from 6 photos with poses: real size, the model is 20 cm.
+        compose.onNodeWithText("Size: ", substring = true).performScrollTo().assertIsDisplayed()
+        val sizeText = compose.onNodeWithText("Size: ", substring = true).fetchSemanticsNode().config[SemanticsProperties.Text].joinToString { it.text }
+        assertFalse(sizeText, sizeText.contains("≈"))
+        assertTrue(sizeText, sizeText.contains("20.0 × 20.0 × 20.0 cm"))
+        compose.onNodeWithText("Built from 6 photos on your computer.", substring = true).assertExists()
+
+        compose.onNodeWithText("Save to My models").performScrollTo().performClick()
+        waitForText("Saved to My models")
+        val app = ApplicationProvider.getApplicationContext<Application>() as Reality3DApplication
+        val saved = app.services.projects.refresh().single()
+        assertEquals(ProjectKind.PHOTOGRAMMETRY, saved.kind)
+        assertTrue(saved.sizeKnown)
+        assertTrue(saved.name.startsWith("Photo model "))
+    }
+
+    @Test
+    fun buildingOnTheComputerCanBeCancelledAndAFailureBringsTheCameraBack() {
+        FakeRemote.reset()
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        RemoteSettingsStore(app).save(RemoteSettings(url = "http://192.168.1.20:8765"))
+        startScanning()
+
+        FakeRemote.hold = CompletableDeferred()
+        compose.onNodeWithText("Build on my computer · best quality").performClick()
+        waitForText("Building on your computer")
+        compose.onNodeWithText("This takes a few minutes.", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Cancel").performClick()
+        // Back at the camera with the scan as it was.
+        waitForText("Covered 60%")
+        assertEquals(1, FakeRemote.photoBuilds)
+
+        FakeRemote.hold = null
+        FakeRemote.photoFailure = "The photos didn't show enough detail."
+        compose.onNodeWithText("Build on my computer · best quality").performClick()
+        waitForText("The photos didn't show enough detail.")
+        compose.onNodeWithText("Covered 60%").assertIsDisplayed()
+        assertEquals(2, FakeRemote.photoBuilds)
+        FakeRemote.reset()
+    }
+
+    @Test
+    fun theComputerBuildNeedsEnoughPhotosFirst() {
+        startScanning()
+        val engine = FakeScanner.engine!!
+        compose.runOnUiThread { engine.emit(ScanStatus(phase = ScanPhase.SCANNING, coverageFraction = 0.2f, photos = 8, depthFrames = 5)) }
+        waitForText("Covered 20%")
+        compose.onNodeWithText("Build on my computer · best quality").assertIsNotEnabled()
+        compose.onNodeWithText("Needs at least 12 photos: keep going around.").assertExists()
+        compose.runOnUiThread { engine.emit(ScanStatus(phase = ScanPhase.SCANNING, coverageFraction = 0.5f, photos = 45, depthFrames = 40)) }
+        waitForText("Covered 50%")
+        compose.onNodeWithText("Build on my computer · best quality").assertIsEnabled()
+        compose.onNodeWithText("40 or more photos give a cleaner model.").assertDoesNotExist()
     }
 }

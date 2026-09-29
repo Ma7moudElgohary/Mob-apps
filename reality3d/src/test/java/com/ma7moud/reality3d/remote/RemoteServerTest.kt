@@ -3,7 +3,11 @@ package com.ma7moud.reality3d.remote
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ma7moud.reality3d.mesh.GlbWriter
 import com.ma7moud.reality3d.mesh.Mesh3D
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -13,9 +17,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
@@ -56,7 +62,47 @@ class RemoteServerTest {
     private fun json(code: Int, body: String) = Triple(code, "application/json", body.toByteArray())
 
     @After
-    fun tearDown() = server.close()
+    fun tearDown() {
+        server.close()
+        photoServer?.close()
+    }
+
+    private var photoServer: TinyHttpServer? = null
+    private var photoBody: ByteArray = ByteArray(0)
+    private var photoPath: String = ""
+    private val cancelled = AtomicBoolean(false)
+    private val statusPolls = AtomicInteger()
+
+    /** Behaves like the photo builder: takes a zip at /v1/photo-jobs, works, then hands over the GLB, or is told to stop. */
+    private fun photoBuilder(finalStatus: String = "done"): String {
+        val started = TinyHttpServer { method, path, _, body ->
+            when {
+                path == "/v1/health" -> json(200, """{"name":"Reality3D server","version":"1.1","authRequired":false,"engines":[{"id":"photogrammetry","name":"Photos → 3D","note":"","available":false,"kind":"photos","why":"Run  pip install pycolmap"}]}""")
+                method == "POST" && path.startsWith("/v1/photo-jobs") -> {
+                    photoPath = path
+                    photoBody = body
+                    json(202, """{"id":"job7","status":"queued"}""")
+                }
+                method == "DELETE" -> {
+                    cancelled.set(true)
+                    json(200, """{"id":"job7","status":"cancelled"}""")
+                }
+                path.endsWith("/result") -> Triple(200, "model/gltf-binary", glb)
+                path == "/v1/jobs/job7" -> when (statusPolls.incrementAndGet()) {
+                    1 -> json(200, """{"id":"job7","status":"queued","progress":null,"message":null}""")
+                    2 -> json(200, """{"id":"job7","status":"running","progress":0.42,"message":"Building the surface from the photos"}""")
+                    else -> if (finalStatus == "done") json(200, """{"id":"job7","status":"done","progress":1.0,"message":null}""")
+                    else if (finalStatus == "running") json(200, """{"id":"job7","status":"running","progress":0.5,"message":"Still going"}""")
+                    else json(200, """{"id":"job7","status":"$finalStatus","progress":null,"message":"The photos didn't show enough detail."}""")
+                }
+                else -> json(404, """{"detail":"Not Found"}""")
+            }
+        }
+        photoServer = started
+        return "127.0.0.1:${started.port}"
+    }
+
+    private fun zipFile(bytes: ByteArray): File = File.createTempFile("photos", ".zip").apply { writeBytes(bytes); deleteOnExit() }
 
     @Test
     fun talksToTheServer() = runBlocking {
@@ -77,6 +123,61 @@ class RemoteServerTest {
         assertTrue(body.contains(String(png, Charsets.ISO_8859_1)))
         assertTrue(progress.contains(0.5f to "Generating the shape"))
         assertEquals(1f to "Downloading the model", progress.last())
+    }
+
+    @Test
+    fun sendsAZipOfPhotosAndBringsBackTheModel() = runBlocking {
+        val address = photoBuilder()
+        val client = HttpRemoteServer(pollMillis = 10)
+        val engine = client.health(RemoteSettings(address)).engines.single()
+        assertEquals("photos", engine.kind)
+        assertEquals("Run  pip install pycolmap", engine.why)
+        assertTrue(!engine.available)
+
+        val zip = ByteArray(300_000) { (it * 31).toByte() }
+        val steps = ArrayList<Pair<Float?, String?>>()
+        val result = client.buildFromPhotos(
+            RemoteSettings(address), zipFile(zip), PhotoBuildOptions(BuildQuality.HIGH, BuildMode.SCENE),
+        ) { f, m -> steps += f to m }
+        assertArrayEquals(glb, result)
+        assertArrayEquals(zip, photoBody)
+        assertEquals("/v1/photo-jobs?quality=high&mode=scene", photoPath)
+        assertEquals(null to "Sending the photos (100%)", steps.first { it.second?.startsWith("Sending the photos (") == true && it.second!!.endsWith("%)") })
+        assertTrue(steps.contains(null to "Waiting for the server"))
+        assertTrue(steps.contains(0.42f to "Building the surface from the photos"))
+        assertEquals(1f to "Downloading the model", steps.last())
+        assertTrue("nothing to cancel when it went well", !cancelled.get())
+    }
+
+    @Test
+    fun givingUpTellsTheComputerToStopWorking() = runBlocking {
+        val address = photoBuilder(finalStatus = "running")
+        val client = HttpRemoteServer(pollMillis = 10)
+        val job = launch(Dispatchers.IO) {
+            client.buildFromPhotos(RemoteSettings(address), zipFile(ByteArray(1000)), PhotoBuildOptions()) { _, _ -> }
+        }
+        withTimeout(10_000) { while (statusPolls.get() < 3) kotlinx.coroutines.delay(10) }
+        job.cancelAndJoin()
+        assertTrue("the computer was told to stop", cancelled.get())
+    }
+
+    @Test
+    fun explainsWhyABuildFailedOrWasStopped() {
+        val client = HttpRemoteServer(pollMillis = 10)
+        val failed = assertThrows(RemoteException::class.java) {
+            runBlocking { client.buildFromPhotos(RemoteSettings(photoBuilder("failed")), zipFile(ByteArray(10)), PhotoBuildOptions()) { _, _ -> } }
+        }
+        assertEquals("The photos didn't show enough detail.", failed.message)
+        statusPolls.set(0)
+        val stopped = assertThrows(RemoteException::class.java) {
+            runBlocking { client.buildFromPhotos(RemoteSettings(photoBuilder("cancelled")), zipFile(ByteArray(10)), PhotoBuildOptions()) { _, _ -> } }
+        }
+        assertEquals("The job was cancelled on the computer.", stopped.message)
+        // An older server has no photo builder at all.
+        val old = assertThrows(RemoteException::class.java) {
+            runBlocking { client.buildFromPhotos(RemoteSettings(url), zipFile(ByteArray(10)), PhotoBuildOptions()) { _, _ -> } }
+        }
+        assertEquals("This server is older and has no photo builder. Update the reality3d-server folder on the computer.", old.message)
     }
 
     @Test

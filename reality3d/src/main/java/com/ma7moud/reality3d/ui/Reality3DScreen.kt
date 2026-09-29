@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -184,6 +186,10 @@ fun Reality3DApp(viewModel: Reality3DViewModel, useGlViewer: Boolean) {
     }
 }
 
+/** How many photos the system picker is asked for at most: what it allows, up to the builder's comfortable size. */
+private fun pickLimit(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) minOf(200, MediaStore.getPickImagesMaxLimit()) else 200
+
 /** The app's screens besides the mask editor, which opens over the home screen. */
 private enum class Destination { HOME, SCAN, GALLERY, PROJECT }
 
@@ -206,6 +212,12 @@ private fun Reality3DScreen(
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) viewModel.loadPhoto(uri)
+    }
+    val photosPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(pickLimit())) { uris ->
+        if (uris.isNotEmpty()) viewModel.pickPhotos(uris)
+    }
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importModel(uri)
     }
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = cameraUri
@@ -313,6 +325,32 @@ private fun Reality3DScreen(
         Header()
         state.crash?.let { CrashCard(it, onClose = viewModel::dismissCrash) }
         ScanCard(onScan)
+        PhotosCard(
+            remote = state.remote,
+            build = state.photoBuild,
+            onPickPhotos = {
+                try {
+                    photosPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                } catch (e: ActivityNotFoundException) {
+                    viewModel.showMessage("No gallery app was found on this phone.", isError = true)
+                }
+            },
+            onClearPhotos = viewModel::clearPickedPhotos,
+            onQuality = viewModel::setBuildQuality,
+            onMode = viewModel::setBuildMode,
+            onBuild = viewModel::buildFromPhotos,
+            onCancel = viewModel::cancelPhotoBuild,
+            onOpenFile = {
+                try {
+                    modelPicker.launch(arrayOf("model/gltf-binary", "application/octet-stream", "*/*"))
+                } catch (e: ActivityNotFoundException) {
+                    viewModel.showMessage("No file manager was found on this phone.", isError = true)
+                }
+            },
+            onOpenModel = onOpenProject,
+            onSaveServer = viewModel::saveRemoteSettings,
+            onCheckServer = viewModel::checkServer,
+        )
         projects?.takeIf { it.isNotEmpty() }?.let { MyModelsRow(it, onOpen = onOpenProject, onSeeAll = onGallery) }
         Text(
             "Or from a single photo",
@@ -479,8 +517,9 @@ private fun ScanCard(onScan: () -> Unit) {
                 )
             }
             Text(
-                "Put the object on a table and walk slowly around it, twice. The phone talks you through every step, " +
-                    "then builds a closed, coloured model at its real size, in centimetres.",
+                "Put the object on a table and walk slowly around it, twice. The phone talks you through every step. " +
+                    "Then it builds a closed, coloured model at its real size right here, or sends the photos to your " +
+                    "computer, which makes a much more detailed one.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
@@ -921,7 +960,10 @@ private fun AboutCard() {
     ) {
         Text(
             "How it works: the 360° scan fuses ARCore's raw depth, weighted by its confidence, into one closed surface " +
-                "and colours it from the photos taken on the way round. From a single photo, ML Kit cuts the objects out, " +
+                "and colours it from the photos taken on the way round. The most detailed models come from many photos " +
+                "worked out on your own computer, the way photogrammetry apps do (COLMAP and OpenMVS): the scan's photos " +
+                "with ARCore's positions give a real-size model, and photos from the normal camera give the shape. " +
+                "From a single photo, ML Kit cuts the objects out, " +
                 "Depth Anything V2 estimates their depth and the outline is inflated into a rounded shape; one photo cannot " +
                 "show the back, so Solid mode mirrors the front, or an image-to-3D AI on your own computer makes the whole " +
                 "object. Everything else runs on the phone.",

@@ -54,6 +54,8 @@ android {
         unitTests.isReturnDefaultValues = true
         // Robolectric smoke tests render the real screen on the JVM.
         unitTests.isIncludeAndroidResources = true
+        // Every screen is rendered on the JVM in one process: give it room.
+        unitTests.all { it.maxHeapSize = "1536m" }
     }
 }
 

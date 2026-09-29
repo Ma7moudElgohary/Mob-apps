@@ -12,4 +12,7 @@ if [ ! -x .venv/bin/python ]; then
 fi
 .venv/bin/python -m pip install --quiet --disable-pip-version-check -r requirements.txt \
   || { echo "Couldn't install the libraries. Check the internet connection and try again."; exit 1; }
+# The photo builder is optional: the server still starts without it.
+.venv/bin/python -m pip install --quiet --disable-pip-version-check -r requirements-photos.txt \
+  || echo "Note: the photo builder (3D from many photos) couldn't be installed here; the rest works."
 exec .venv/bin/python run.py

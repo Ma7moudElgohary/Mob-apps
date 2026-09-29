@@ -244,7 +244,11 @@ private fun OpenProject(
         }
         info.quality?.let { report ->
             QualityCard(
-                title = if (info.kind == ProjectKind.SCAN) "Scan quality" else "Photo quality",
+                title = when (info.kind) {
+                    ProjectKind.SCAN -> "Scan quality"
+                    ProjectKind.PHOTOGRAMMETRY -> "Photo set quality"
+                    else -> "Photo quality"
+                },
                 report = report,
                 goodText = "Nothing held this capture back.",
             )
@@ -298,6 +302,8 @@ private fun summary(project: ProjectInfo): String =
         ProjectKind.SCAN -> "360° scan"
         ProjectKind.PHOTO -> "From a photo"
         ProjectKind.AI -> "AI full 3D"
+        ProjectKind.PHOTOGRAMMETRY -> "From many photos"
+        ProjectKind.IMPORTED -> "Opened from a file"
     } + " · " +
         DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(project.createdAt)) +
         (project.quality?.let { " · quality ${it.score}/100" } ?: "")

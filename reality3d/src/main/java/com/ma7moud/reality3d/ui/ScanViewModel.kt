@@ -18,6 +18,17 @@ import com.ma7moud.reality3d.export.Exporter
 import com.ma7moud.reality3d.mesh.GameReadyPack
 import com.ma7moud.reality3d.project.ProjectDraft
 import com.ma7moud.reality3d.project.ProjectKind
+import com.ma7moud.reality3d.remote.PhotoBuildOptions
+import com.ma7moud.reality3d.remote.PhotoModel
+import com.ma7moud.reality3d.remote.PhotoModelBuilder
+import com.ma7moud.reality3d.remote.PhotoZip
+import com.ma7moud.reality3d.remote.RemoteException
+import com.ma7moud.reality3d.remote.RemoteSettings
+import com.ma7moud.reality3d.remote.RemoteSettingsStore
+import com.ma7moud.reality3d.remote.ServerAddress
+import com.ma7moud.reality3d.remote.quality
+import com.ma7moud.reality3d.export.ModelTexture
+import com.ma7moud.reality3d.quality.QualityReport
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanLog
@@ -32,6 +43,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -45,6 +57,9 @@ sealed interface ScanScreenState {
     data class Unsupported(val reason: String) : ScanScreenState
     data object Scanning : ScanScreenState
     data class Building(val label: String) : ScanScreenState
+
+    /** The photos are being built into a model on the user's computer (this takes minutes). */
+    data class Remote(val label: String, val fraction: Float?) : ScanScreenState
     class Result(val capture: ScanCapture) : ScanScreenState
     data class Failed(val message: String) : ScanScreenState
 }
@@ -70,6 +85,13 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     val saved: StateFlow<ScanCapture?> = _saved.asStateFlow()
 
     private val projects = (application as Reality3DApplication).services.projects
+    private val remoteSettings = RemoteSettingsStore(application)
+    private val photoBuilder = PhotoModelBuilder((application as Reality3DApplication).services.remote)
+
+    private val _needsComputer = MutableStateFlow<String?>(null)
+
+    /** Set (to what to tell the person) while the address of their computer is asked for. */
+    val needsComputer: StateFlow<String?> = _needsComputer.asStateFlow()
 
     var engine: ScanEngine? = null
         private set
@@ -90,7 +112,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     /** Checks ARCore (and installs it the first time); call whenever the screen resumes with camera access. */
     fun check(activity: Activity) {
         when (_screen.value) {
-            ScanScreenState.Scanning, is ScanScreenState.Building, is ScanScreenState.Result -> return
+            ScanScreenState.Scanning, is ScanScreenState.Building, is ScanScreenState.Remote, is ScanScreenState.Result -> return
             else -> Unit
         }
         checkJob?.cancel()
@@ -145,6 +167,75 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** The computer the photos go to: asks for its address when there is none yet. */
+    fun buildOnComputer() {
+        if (_screen.value != ScanScreenState.Scanning) return
+        if (remoteSettings.load().url.isBlank()) {
+            _needsComputer.value = "Run the Reality3D server on your computer and type the address it shows. The phone and the computer must be on the same Wi-Fi."
+            return
+        }
+        sendPhotos()
+    }
+
+    fun saveComputer(address: String, token: String) {
+        val url = try {
+            ServerAddress.normalize(address)
+        } catch (e: RemoteException) {
+            _needsComputer.value = e.message
+            return
+        }
+        remoteSettings.save(remoteSettings.load().copy(url = url, token = token.trim()))
+        _needsComputer.value = null
+        sendPhotos()
+    }
+
+    fun dismissComputer() {
+        _needsComputer.value = null
+    }
+
+    /** Zips the scan's photos, has the computer build the model from them, and shows what comes back. */
+    private fun sendPhotos() {
+        val current = engine ?: return
+        val settings = remoteSettings.load()
+        _message.value = null
+        _screen.value = ScanScreenState.Remote("Getting the photos ready…", null)
+        log.event("Building on the computer")
+        buildJob = viewModelScope.launch {
+            val zip = File(getApplication<Application>().cacheDir, "scan_photos.zip")
+            try {
+                val info = photoBuilder.checkServer(settings)
+                val photos = current.photoSet() ?: throw RemoteException("There are no photos yet. Walk around the object first.")
+                val zipped = withContext(Dispatchers.IO) { PhotoZip.fromScan(photos, zip) }
+                val model = photoBuilder.build(settings.copy(engine = info.id), zipped.file, PhotoBuildOptions()) { fraction, label ->
+                    _screen.update { if (it is ScanScreenState.Remote) ScanScreenState.Remote(label ?: it.label, fraction ?: it.fraction) else it }
+                }
+                val capture = ScanCapture(
+                    model.mesh, photos.keyframes, model.quality(photos.keyframes.size),
+                    texture = model.texture, metersPerUnit = model.metersPerUnit, sizeKnown = model.sizeKnown, fromPhotos = true,
+                )
+                log.event("Built on the computer from ${photos.keyframes.size} photos (${model.placed ?: "?"} placed), ${model.mesh.triangleCount} triangles")
+                _screen.value = ScanScreenState.Result(capture)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ensureActive()
+                Log.w(TAG, "Building on the computer failed", e)
+                log.event("Building on the computer failed: ${e.message}")
+                // Back to the camera: the photos are still there, and more of them may be what was missing.
+                _message.value = (e.message ?: e.javaClass.simpleName) to true
+                _screen.value = ScanScreenState.Scanning
+            } finally {
+                zip.delete()
+            }
+        }
+    }
+
+    /** Gives up on the computer's build and goes back to the camera with the scan as it was. */
+    fun cancelComputer() {
+        buildJob?.cancel()
+        if (_screen.value is ScanScreenState.Remote) _screen.value = ScanScreenState.Scanning
+    }
+
     /** Back to the camera with everything scanned so far, to fill in what the first build missed. */
     fun addMoreViews() {
         val current = engine ?: return
@@ -159,6 +250,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     fun reset() {
         checkJob?.cancel()
         buildJob?.cancel()
+        _needsComputer.value = null
         release()
         installRequested = false
         _message.value = null
@@ -199,7 +291,11 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         _exporting.value = true
         return try {
             withContext(Dispatchers.Default) {
-                Exporter.encode(format, result.capture.mesh, null, baseName, result.capture.keyframes, budget)
+                val capture = result.capture
+                Exporter.encode(
+                    format, capture.mesh, capture.texture?.let { ModelTexture(it, floatArrayOf(0f, 0f, 1f, 1f)) }, baseName, capture.keyframes, budget,
+                    longestSideMeters = capture.metersPerUnit * capture.mesh.longestSide,
+                )
             }
         } finally {
             _exporting.value = false
@@ -215,13 +311,15 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
                 val info = withContext(Dispatchers.IO) {
                     projects.save(
                         ProjectDraft(
-                            name = "Scan " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date()),
-                            kind = ProjectKind.SCAN,
+                            name = (if (capture.fromPhotos) "Photo model " else "Scan ") + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date()),
+                            kind = if (capture.fromPhotos) ProjectKind.PHOTOGRAMMETRY else ProjectKind.SCAN,
                             mesh = capture.mesh,
                             thumbnail = thumbnailOf(capture) ?: createBitmap(8, 8),
-                            metersPerUnit = 1f,
-                            sizeKnown = true,
+                            metersPerUnit = capture.metersPerUnit,
+                            sizeKnown = capture.sizeKnown,
                             quality = capture.quality,
+                            texture = capture.texture,
+                            textureRegion = if (capture.texture != null) floatArrayOf(0f, 0f, 1f, 1f) else null,
                         ),
                     )
                 }

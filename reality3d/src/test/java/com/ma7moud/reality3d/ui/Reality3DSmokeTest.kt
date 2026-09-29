@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.net.Uri
 import android.media.ExifInterface
 import android.os.Looper
 import android.view.View
@@ -44,9 +45,15 @@ import com.ma7moud.reality3d.ai.ShapeHint
 import com.ma7moud.reality3d.depth.DepthEngine
 import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.export.ExportFormat
+import com.ma7moud.reality3d.mesh.GlbTestKit
 import com.ma7moud.reality3d.mesh.GlbWriter
 import com.ma7moud.reality3d.mesh.Mesh3D
+import com.ma7moud.reality3d.project.ProjectKind
+import com.ma7moud.reality3d.remote.BuildMode
+import com.ma7moud.reality3d.remote.BuildQuality
+import com.ma7moud.reality3d.remote.PhotoBuildOptions
 import com.ma7moud.reality3d.remote.RemoteEngine
+import com.ma7moud.reality3d.remote.RemoteException
 import com.ma7moud.reality3d.remote.RemoteServer
 import com.ma7moud.reality3d.remote.RemoteSettings
 import com.ma7moud.reality3d.remote.ServerInfo
@@ -61,6 +68,7 @@ import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.Subject
 import com.ma7moud.reality3d.segmentation.SubjectMask
 import com.ma7moud.reality3d.segmentation.SubjectSegmenterEngine
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
@@ -79,6 +87,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.Duration
+import java.util.zip.ZipFile
 import kotlin.math.hypot
 
 /** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
@@ -190,23 +199,58 @@ internal object FakeArPreview : ArPreviewFactory {
     }
 }
 
-/** Stands in for the user's computer: an SF3D server that returns a small closed model. */
+/** Stands in for the user's computer: an SF3D server that returns a small closed model, and a photo builder. */
 internal object FakeRemote : RemoteServer {
     var uploads = 0
+    var photoBuilds = 0
+    var photosReady = true
+    var lastOptions: PhotoBuildOptions? = null
+    var lastPhotos: Map<String, ByteArray> = emptyMap()
+
+    /** When set, the photo builder waits for it, so a test can look at (or cancel) a build in progress. */
+    var hold: CompletableDeferred<Unit>? = null
+    var photoFailure: String? = null
+
+    private val tetra = Mesh3D(
+        floatArrayOf(0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), FloatArray(12), null,
+        intArrayOf(0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3), solid = true, subjectIsolated = true,
+    )
+
+    fun reset() {
+        photoBuilds = 0
+        photosReady = true
+        lastOptions = null
+        lastPhotos = emptyMap()
+        hold = null
+        photoFailure = null
+    }
 
     override suspend fun health(settings: RemoteSettings) = ServerInfo(
-        "Reality3D server", "1.0", authRequired = false,
-        engines = listOf(RemoteEngine("preview", "Quick preview (CPU)", "", true), RemoteEngine("sf3d", "Stable Fast 3D", "Fast and textured", true)),
+        "Reality3D server", "1.1", authRequired = false,
+        engines = listOf(
+            RemoteEngine("preview", "Quick preview (CPU)", "", true),
+            RemoteEngine("sf3d", "Stable Fast 3D", "Fast and textured", true),
+            RemoteEngine("photogrammetry", "Photos → 3D", "", photosReady, kind = "photos", why = if (photosReady) null else "Run  pip install pycolmap"),
+        ),
     )
 
     override suspend fun generate(settings: RemoteSettings, png: ByteArray, onProgress: (Float?, String?) -> Unit): ByteArray {
         uploads++
         onProgress(0.5f, "Generating the shape")
-        val tetra = Mesh3D(
-            floatArrayOf(0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f), FloatArray(12), null,
-            intArrayOf(0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3), solid = true, subjectIsolated = true,
-        )
         return GlbWriter.write(tetra, texture = null)
+    }
+
+    override suspend fun buildFromPhotos(settings: RemoteSettings, photos: File, options: PhotoBuildOptions, onProgress: (Float?, String?) -> Unit): ByteArray {
+        photoBuilds++
+        lastOptions = options
+        lastPhotos = ZipFile(photos).use { zip -> zip.entries().asSequence().associate { it.name to zip.getInputStream(it).readBytes() } }
+        onProgress(0.5f, "Building the surface from the photos")
+        hold?.await()
+        photoFailure?.let { throw RemoteException(it) }
+        val count = lastPhotos.keys.count { it.startsWith("images/") }
+        // A scan's photos come with poses, so the model comes back in real meters.
+        val known = "cameras.json" in lastPhotos
+        return GlbTestKit.withBuildNote(GlbWriter.write(tetra, texture = null, longestSideMeters = 0.2f), scaleKnown = known, photos = count, placed = count)
     }
 }
 
@@ -248,7 +292,8 @@ class Reality3DSmokeTest {
     @Before
     fun setUp() = forgetFileProviderFolders()
 
-    private fun waitForText(text: String) = waitFor { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
+    private fun waitForText(text: String, substring: Boolean = false) =
+        waitFor { compose.onAllNodesWithText(text, substring = substring).fetchSemanticsNodes().isNotEmpty() }
 
     /** Waits for [condition], letting delayed main-thread work (like the rebuild debounce) run. */
     private fun waitFor(condition: () -> Boolean) {
@@ -477,5 +522,137 @@ class Reality3DSmokeTest {
         compose.onNodeWithText("Make 3D model").performScrollTo().performClick()
         waitFor { viewModel.state.value.mesh != null && viewModel.state.value.progress == null }
         assertFalse(viewModel.state.value.message, viewModel.state.value.isError)
+    }
+
+    private fun fakeJpegs(count: Int): List<Uri> = List(count) { i ->
+        // The first bytes of a JPEG are all the app looks at when the photo goes into the zip as it is.
+        Uri.fromFile(File(compose.activity.cacheDir, "pick$i.jpg").apply { writeBytes(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), i.toByte(), 7, 7)) })
+    }
+
+    private fun connectComputer(viewModel: Reality3DViewModel) {
+        compose.runOnUiThread { viewModel.saveRemoteSettings("192.168.1.20:8765", "") }
+        waitFor { viewModel.state.value.remote.server != null }
+    }
+
+    @Test
+    fun manyPhotosBecomeAModelOnTheComputerAndArePutInMyModels() {
+        FakeRemote.reset()
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        compose.onNodeWithText("3D from many photos").performScrollTo().assertIsDisplayed()
+        // Nothing to build with yet: the button is there, and off.
+        compose.onNodeWithText("Connect your computer").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Build the model on my computer").performScrollTo().assertIsNotEnabled()
+        connectComputer(viewModel)
+        waitForText("Connected to 192.168.1.20:8765. The photo builder is ready.")
+
+        compose.runOnUiThread { viewModel.pickPhotos(fakeJpegs(8)) }
+        waitForText("8 photos")
+        compose.onNodeWithText("One object").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("High").performScrollTo().performClick()
+        compose.onNodeWithText("Whole scene").performScrollTo().performClick()
+        assertEquals(PhotoBuildOptions(BuildQuality.HIGH, BuildMode.SCENE), viewModel.state.value.photoBuild.options)
+        compose.onNodeWithText("Build the model on my computer").performScrollTo().assertIsEnabled().performClick()
+
+        waitFor { viewModel.state.value.photoBuild.savedId != null }
+        assertFalse(viewModel.state.value.photoBuild.status, viewModel.state.value.photoBuild.statusIsError)
+        assertEquals(1, FakeRemote.photoBuilds)
+        assertEquals(PhotoBuildOptions(BuildQuality.HIGH, BuildMode.SCENE), FakeRemote.lastOptions)
+        // The photos went as they were: a zip of eight images, no poses.
+        assertEquals((0 until 8).map { "images/photo_00$it.jpg" }, FakeRemote.lastPhotos.keys.sorted())
+        assertTrue(FakeRemote.lastPhotos.getValue("images/photo_003.jpg").contentEquals(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte(), 3, 7, 7)))
+        assertTrue(viewModel.state.value.photoBuild.picked.isEmpty())
+        compose.onNodeWithText("Saved to My models as", substring = true).performScrollTo().assertIsDisplayed()
+
+        val app = ApplicationProvider.getApplicationContext<Application>() as Reality3DApplication
+        val saved = app.services.projects.refresh().single()
+        assertEquals(ProjectKind.PHOTOGRAMMETRY, saved.kind)
+        assertEquals(viewModel.state.value.photoBuild.savedId, saved.id)
+        // No poses came with the photos, so the size isn't known.
+        assertFalse(saved.sizeKnown)
+        assertNotNull(saved.quality)
+        assertTrue(saved.quality!!.issues.any { it.startsWith("Only 8 photos.") })
+
+        compose.onNodeWithText("Open").performScrollTo().performClick()
+        waitForText("From many photos", substring = true)
+    }
+
+    @Test
+    fun theHomeScreenSaysWhenTheComputerCantBuildFromPhotosYet() {
+        FakeRemote.reset()
+        FakeRemote.photosReady = false
+        try {
+            val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+            connectComputer(viewModel)
+            compose.runOnUiThread { viewModel.pickPhotos(fakeJpegs(8)) }
+            waitForText("Connected, but the photo builder isn't ready: Run  pip install pycolmap")
+            compose.onNodeWithText("Build the model on my computer").performScrollTo().assertIsNotEnabled()
+        } finally {
+            FakeRemote.reset()
+        }
+    }
+
+    @Test
+    fun aBuildCanBeCancelledAndFewPhotosAreNotEnough() {
+        FakeRemote.reset()
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        connectComputer(viewModel)
+        compose.runOnUiThread { viewModel.pickPhotos(fakeJpegs(3)) }
+        waitForText("At least 6 photos are needed; 40 or more work best.")
+        compose.onNodeWithText("Build the model on my computer").performScrollTo().assertIsNotEnabled()
+
+        compose.runOnUiThread { viewModel.pickPhotos(fakeJpegs(9)) }
+        FakeRemote.hold = CompletableDeferred()
+        compose.runOnUiThread { viewModel.buildFromPhotos() }
+        waitForText("Building the surface from the photos")
+        compose.onNodeWithText("Cancel").performScrollTo().performClick()
+        waitFor { viewModel.state.value.photoBuild.progress == null }
+        assertEquals(null, viewModel.state.value.photoBuild.savedId)
+        FakeRemote.reset()
+    }
+
+    @Test
+    fun aBuildThatFailsSaysWhyAndKeepsThePhotosPicked() {
+        FakeRemote.reset()
+        FakeRemote.photoFailure = "The photos didn't show enough detail."
+        try {
+            val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+            connectComputer(viewModel)
+            compose.runOnUiThread { viewModel.pickPhotos(fakeJpegs(7)) }
+            compose.runOnUiThread { viewModel.buildFromPhotos() }
+            waitFor { viewModel.state.value.photoBuild.statusIsError }
+            assertEquals("The photos didn't show enough detail.", viewModel.state.value.photoBuild.status)
+            assertEquals(7, viewModel.state.value.photoBuild.picked.size)
+            compose.onNodeWithText("The photos didn't show enough detail.").performScrollTo().assertIsDisplayed()
+        } finally {
+            FakeRemote.reset()
+        }
+    }
+
+    @Test
+    fun aGlbFromAnotherAppOpensAndIsSavedToMyModels() {
+        val viewModel = ViewModelProvider(compose.activity)[Reality3DViewModel::class.java]
+        val square = Mesh3D(
+            floatArrayOf(0f, 0f, 0f, 2f, 0f, 0f, 0f, 2f, 0f, 0f, 0f, 2f), FloatArray(12), null,
+            intArrayOf(0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3), solid = true, subjectIsolated = true,
+        )
+        val file = File(compose.activity.cacheDir, "Chair from Scaniverse.glb").apply { writeBytes(GlbWriter.write(square, texture = null, longestSideMeters = 2f)) }
+        compose.runOnUiThread { viewModel.importModel(Uri.fromFile(file)) }
+        waitFor { viewModel.state.value.photoBuild.savedId != null }
+        assertFalse(viewModel.state.value.photoBuild.status, viewModel.state.value.photoBuild.statusIsError)
+        val app = ApplicationProvider.getApplicationContext<Application>() as Reality3DApplication
+        val saved = app.services.projects.refresh().single()
+        assertEquals(ProjectKind.IMPORTED, saved.kind)
+        assertEquals("Chair from Scaniverse", saved.name)
+        assertEquals(4, saved.triangles)
+        // Two meters across, taken at its word but not claimed to be measured.
+        assertFalse(saved.sizeKnown)
+        assertEquals(2f, saved.size.max(), 1e-3f)
+
+        // A file that isn't a model says so and leaves My models alone.
+        val notAModel = File(compose.activity.cacheDir, "notes.glb").apply { writeBytes(ByteArray(200)) }
+        compose.runOnUiThread { viewModel.importModel(Uri.fromFile(notAModel)) }
+        waitFor { viewModel.state.value.photoBuild.statusIsError }
+        assertTrue(viewModel.state.value.photoBuild.status!!.startsWith("Couldn't open that file:"))
+        assertEquals(1, app.services.projects.refresh().size)
     }
 }

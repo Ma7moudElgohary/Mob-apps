@@ -1,6 +1,7 @@
 package com.ma7moud.reality3d.ui
 
 import android.app.Application
+import android.provider.OpenableColumns
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -33,7 +34,13 @@ import com.ma7moud.reality3d.project.ProjectDraft
 import com.ma7moud.reality3d.project.ProjectKind
 import com.ma7moud.reality3d.quality.PhotoQuality
 import com.ma7moud.reality3d.quality.QualityReport
+import com.ma7moud.reality3d.remote.BuildMode
+import com.ma7moud.reality3d.remote.BuildQuality
+import com.ma7moud.reality3d.remote.PhotoBuildOptions
+import com.ma7moud.reality3d.remote.PhotoModelBuilder
+import com.ma7moud.reality3d.remote.PhotoZip
 import com.ma7moud.reality3d.remote.RemoteException
+import com.ma7moud.reality3d.remote.quality
 import com.ma7moud.reality3d.remote.RemoteSettings
 import com.ma7moud.reality3d.remote.RemoteSettingsStore
 import com.ma7moud.reality3d.remote.ServerAddress
@@ -94,6 +101,20 @@ data class UiState(
     val canTurnBackOn: Boolean = false,
     /** ML Kit can't tell objects apart on this phone: offer Segment Anything (its download size in bytes). */
     val segmentAnythingOffer: Long? = null,
+    /** 3D from many photos on the user's computer, and models opened from files. */
+    val photoBuild: PhotoBuildUi = PhotoBuildUi(),
+)
+
+/** Many photos picked from the gallery, on their way to the computer's photo builder, and what came of it. */
+data class PhotoBuildUi(
+    val picked: List<Uri> = emptyList(),
+    val options: PhotoBuildOptions = PhotoBuildOptions(),
+    val progress: Progress? = null,
+    val status: String? = null,
+    val statusIsError: Boolean = false,
+    /** The model that was made or opened, saved to My models. */
+    val savedId: String? = null,
+    val savedName: String? = null,
 )
 
 /** A full 3D model made by an image-to-3D AI on the user's computer. */
@@ -183,6 +204,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     private val remoteSettings = RemoteSettingsStore(application)
     private val lastPhoto = LastPhoto(File(application.filesDir, "last_photo"))
     private var remoteJob: Job? = null
+    private val photoBuilder = PhotoModelBuilder(services.remote)
+    private var photoJob: Job? = null
     private var pipeline: Job? = null
     private var rebuild: Job? = null
     private var pendingSave: ExportFile? = null
@@ -730,7 +753,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             try {
                 val info = services.remote.health(settings)
-                val available = info.engines.filter { it.available }
+                val available = info.engines.filter { it.available && it.kind == "image" }
                 val engine = settings.engine.takeIf { id -> available.any { it.id == id } }
                     ?: available.firstOrNull { it.id != PREVIEW_ENGINE }?.id
                     ?: available.firstOrNull()?.id
@@ -743,6 +766,131 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             } catch (e: Exception) {
                 Log.w(TAG, "Couldn't reach the Reality3D server", e)
                 updateRemote { it.copy(server = null, checking = false, status = e.readable(), statusIsError = true) }
+            }
+        }
+    }
+
+    private fun updatePhotoBuild(change: (PhotoBuildUi) -> PhotoBuildUi) = _state.update { it.copy(photoBuild = change(it.photoBuild)) }
+
+    /** The photos chosen in the gallery for the computer's photo builder. */
+    fun pickPhotos(uris: List<Uri>) {
+        if (photoJob?.isActive == true) return
+        updatePhotoBuild { it.copy(picked = uris.take(PhotoZip.MAX_PHOTOS), savedId = null, savedName = null, status = null, statusIsError = false) }
+    }
+
+    fun clearPickedPhotos() {
+        if (photoJob?.isActive == true) return
+        updatePhotoBuild { it.copy(picked = emptyList(), status = null, statusIsError = false) }
+    }
+
+    fun setBuildQuality(quality: BuildQuality) = updatePhotoBuild { it.copy(options = it.options.copy(quality = quality)) }
+
+    fun setBuildMode(mode: BuildMode) = updatePhotoBuild { it.copy(options = it.options.copy(mode = mode)) }
+
+    /** Zips the chosen photos, has the computer build a model from them, and saves it to My models. */
+    fun buildFromPhotos() {
+        val picked = _state.value.photoBuild.picked
+        if (picked.size < MIN_BUILD_PHOTOS || photoJob?.isActive == true) return
+        val settings = _state.value.remote.settings
+        if (settings.url.isBlank()) {
+            updatePhotoBuild { it.copy(status = "Connect to your computer first.", statusIsError = true) }
+            return
+        }
+        val options = _state.value.photoBuild.options
+        photoJob = viewModelScope.launch {
+            val zip = File(getApplication<Application>().cacheDir, "picked_photos.zip")
+            updatePhotoBuild { it.copy(progress = Progress("Getting the photos ready…", null), status = null, statusIsError = false, savedId = null, savedName = null) }
+            try {
+                val engine = photoBuilder.checkServer(settings)
+                val zipped = withContext(Dispatchers.IO) {
+                    PhotoZip.fromUris(getApplication(), picked, zip) { done, total ->
+                        updatePhotoBuild { it.copy(progress = Progress("Getting the photos ready ($done of $total)…", done.toFloat() / total)) }
+                    }
+                }
+                if (zipped.photos < MIN_BUILD_PHOTOS) {
+                    throw RemoteException("Only ${zipped.photos} of the ${picked.size} photos could be read. Pick them again, from the gallery.")
+                }
+                val model = photoBuilder.build(settings.copy(engine = engine.id), zipped.file, options) { fraction, label ->
+                    updatePhotoBuild { it.copy(progress = Progress(label ?: it.progress?.label ?: "Building the model", fraction)) }
+                }
+                val info = withContext(Dispatchers.IO) {
+                    val thumbnail = PhotoZip.thumbnail(getApplication<Application>().contentResolver, picked) ?: createBitmap(8, 8)
+                    services.projects.save(
+                        ProjectDraft(
+                            name = "Photo model " + SimpleDateFormat("d MMM, HH:mm", Locale.getDefault()).format(Date()),
+                            kind = ProjectKind.PHOTOGRAMMETRY,
+                            mesh = model.mesh,
+                            thumbnail = thumbnail,
+                            metersPerUnit = model.metersPerUnit,
+                            sizeKnown = model.sizeKnown,
+                            quality = model.quality(zipped.photos),
+                            texture = model.texture,
+                            textureRegion = if (model.texture != null) floatArrayOf(0f, 0f, 1f, 1f) else null,
+                        ),
+                    )
+                }
+                updatePhotoBuild { it.copy(progress = null, savedId = info.id, savedName = info.name, picked = emptyList()) }
+            } catch (e: CancellationException) {
+                updatePhotoBuild { it.copy(progress = null) }
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Building from photos failed", e)
+                updatePhotoBuild { it.copy(progress = null, status = e.readable(), statusIsError = true) }
+            } finally {
+                zip.delete()
+            }
+        }
+    }
+
+    fun cancelPhotoBuild() {
+        photoJob?.cancel()
+        updatePhotoBuild { it.copy(progress = null) }
+    }
+
+    /** Opens a .glb another app made (KIRI Engine, Scaniverse, Polycam, RealityScan...) and saves it to My models. */
+    fun importModel(uri: Uri) {
+        if (photoJob?.isActive == true) return
+        photoJob = viewModelScope.launch {
+            updatePhotoBuild { it.copy(progress = Progress("Opening the file…", null), status = null, statusIsError = false, savedId = null, savedName = null) }
+            try {
+                val resolver = getApplication<Application>().contentResolver
+                val (bytes, name) = withContext(Dispatchers.IO) {
+                    val display = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                    val data = resolver.openInputStream(uri)?.use { stream ->
+                        stream.readNBytes(MAX_IMPORT_BYTES + 1)
+                    } ?: throw IOException("the file can't be opened")
+                    if (data.size > MAX_IMPORT_BYTES) throw IOException("the file is larger than ${MAX_IMPORT_BYTES / (1024 * 1024)} MB")
+                    data to (display ?: uri.lastPathSegment ?: "Model")
+                }
+                val model = withContext(Dispatchers.Default) { PhotoModelBuilder.open(bytes) }
+                val info = withContext(Dispatchers.IO) {
+                    val thumbnail = model.texture?.let { texture ->
+                        val side = 320
+                        val scale = side.toFloat() / maxOf(texture.width, texture.height)
+                        if (scale < 1f) texture.scale((texture.width * scale).toInt().coerceAtLeast(1), (texture.height * scale).toInt().coerceAtLeast(1)) else texture
+                    } ?: createBitmap(8, 8)
+                    services.projects.save(
+                        ProjectDraft(
+                            name = name.substringBeforeLast('.').take(60).ifBlank { "Model" },
+                            kind = ProjectKind.IMPORTED,
+                            mesh = model.mesh,
+                            thumbnail = thumbnail,
+                            metersPerUnit = model.metersPerUnit,
+                            sizeKnown = model.sizeKnown,
+                            texture = model.texture,
+                            textureRegion = if (model.texture != null) floatArrayOf(0f, 0f, 1f, 1f) else null,
+                        ),
+                    )
+                }
+                updatePhotoBuild { it.copy(progress = null, savedId = info.id, savedName = info.name) }
+            } catch (e: CancellationException) {
+                updatePhotoBuild { it.copy(progress = null) }
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Opening the model failed", e)
+                updatePhotoBuild { it.copy(progress = null, status = "Couldn't open that file: ${e.readable()}", statusIsError = true) }
             }
         }
     }
@@ -977,6 +1125,10 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         private const val THUMBNAIL = 320
         private const val CUTOUT_SIZE = 1024
         private const val PREVIEW_ENGINE = "preview"
+
+        /** The photo builder needs this many photos to have anything to go on. */
+        const val MIN_BUILD_PHOTOS = 6
+        private const val MAX_IMPORT_BYTES = 200 * 1024 * 1024
         private const val OUT_OF_MEMORY_MESSAGE = "The phone ran out of memory for this photo. Close other apps and try again."
         const val NO_SUBJECT_MESSAGE =
             "Couldn't separate the subject from the background, so the whole photo was used. A plain background helps."

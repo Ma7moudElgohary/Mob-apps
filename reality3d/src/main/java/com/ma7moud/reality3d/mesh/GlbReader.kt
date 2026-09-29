@@ -20,7 +20,15 @@ object GlbReader {
         val mesh: Mesh3D,
         /** The base colour image as stored (PNG or JPEG), or null. */
         val texture: ByteArray?,
+        /** What a Reality3D photo build wrote about itself into the file, or null for any other GLB. */
+        val info: BuildInfo? = null,
     )
+
+    /**
+     * The photo builder's note in the GLB: whether the model is in real meters, and how many of the photos
+     * it could place.
+     */
+    class BuildInfo(val scaleKnown: Boolean, val photos: Int?, val placed: Int?)
 
     class FormatException(message: String) : Exception(message)
 
@@ -50,7 +58,19 @@ object GlbReader {
         gltf.optJSONArray("extensionsRequired")?.let { required ->
             if (required.length() > 0) throw FormatException("the model uses ${required.getString(0)}, which isn't supported")
         }
-        return Parser(gltf, binary).parse()
+        return Parser(gltf, binary).parse().let { it.copy(info = buildInfo(gltf)) }
+    }
+
+    private fun Model.copy(info: BuildInfo?) = Model(mesh, texture, info)
+
+    private fun buildInfo(gltf: JSONObject): BuildInfo? {
+        val note = gltf.optJSONObject("asset")?.optJSONObject("extras")?.optJSONObject("reality3d") ?: return null
+        if (note.optString("source") != "photogrammetry") return null
+        return BuildInfo(
+            scaleKnown = note.optBoolean("scaleKnown", false),
+            photos = if (note.has("photos")) note.optInt("photos") else null,
+            placed = if (note.has("placed")) note.optInt("placed") else null,
+        )
     }
 
     private class Parser(val gltf: JSONObject, val binary: ByteBuffer?) {

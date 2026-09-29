@@ -2,6 +2,7 @@
 
 import json
 import struct
+from typing import Optional
 
 import numpy as np
 
@@ -10,8 +11,9 @@ def _pad(data: bytes, fill: bytes = b"\0") -> bytes:
     return data + fill * (-len(data) % 4)
 
 
-def write_glb(positions: np.ndarray, normals: np.ndarray, uvs: np.ndarray, indices: np.ndarray, png: bytes) -> bytes:
-    """positions/normals: (n, 3) float32, uvs: (n, 2) float32 with (0, 0) at the image's top-left, indices: (m,) uint32."""
+def write_glb(positions: np.ndarray, normals: np.ndarray, uvs: np.ndarray, indices: np.ndarray, png: bytes, mime: str = "image/png", extras: Optional[dict] = None) -> bytes:
+    """positions/normals: (n, 3) float32, uvs: (n, 2) float32 with (0, 0) at the image's top-left, indices: (m,) uint32.
+    [png] is the texture as encoded (PNG unless [mime] says otherwise); [extras] goes into the asset for readers that look."""
     positions = np.ascontiguousarray(positions, dtype="<f4")
     normals = np.ascontiguousarray(normals, dtype="<f4")
     uvs = np.ascontiguousarray(uvs, dtype="<f4")
@@ -29,7 +31,7 @@ def write_glb(positions: np.ndarray, normals: np.ndarray, uvs: np.ndarray, indic
         binary += padded
         offset += len(padded)
     gltf = {
-        "asset": {"version": "2.0", "generator": "Reality3D server"},
+        "asset": {"version": "2.0", "generator": "Reality3D server", **({"extras": extras} if extras else {})},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0, "name": "model"}],
@@ -41,7 +43,7 @@ def write_glb(positions: np.ndarray, normals: np.ndarray, uvs: np.ndarray, indic
         "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicFactor": 0.0, "roughnessFactor": 0.9}, "doubleSided": True}],
         "textures": [{"source": 0, "sampler": 0}],
         "samplers": [{"magFilter": 9729, "minFilter": 9987}],
-        "images": [{"bufferView": 4, "mimeType": "image/png"}],
+        "images": [{"bufferView": 4, "mimeType": mime}],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": len(positions), "type": "VEC3",
              "min": positions.min(axis=0).tolist(), "max": positions.max(axis=0).tolist()},

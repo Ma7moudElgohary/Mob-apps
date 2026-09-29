@@ -106,4 +106,19 @@ class GlbReaderTest {
         assertThrows(GlbReader.FormatException::class.java) { GlbReader.read(cut) }
         assertNotNull(GlbReader.read(handMade()).mesh)
     }
+
+    @Test
+    fun readsThePhotoBuildersNoteAndIgnoresOtherFiles() {
+        val plain = GlbWriter.write(tetra, texture = null)
+        assertNull(GlbReader.read(plain).info)
+        val measured = GlbReader.read(GlbTestKit.withBuildNote(plain, scaleKnown = true, photos = 40, placed = 38)).info!!
+        assertTrue(measured.scaleKnown)
+        assertEquals(40, measured.photos)
+        assertEquals(38, measured.placed)
+        val unknown = GlbReader.read(GlbTestKit.withBuildNote(plain, scaleKnown = false)).info!!
+        assertTrue(!unknown.scaleKnown)
+        assertNull(unknown.photos)
+        // The note doesn't get in the way of the model itself.
+        assertArrayEquals(tetra.indices, GlbReader.read(GlbTestKit.withBuildNote(plain, scaleKnown = true)).mesh.indices)
+    }
 }

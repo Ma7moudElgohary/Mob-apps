@@ -34,6 +34,7 @@ import com.ma7moud.reality3d.scan.DepthFrame
 import com.ma7moud.reality3d.scan.DepthQuality
 import com.ma7moud.reality3d.scan.Intrinsics
 import com.ma7moud.reality3d.scan.Keyframe
+import com.ma7moud.reality3d.scan.PhotoSet
 import com.ma7moud.reality3d.scan.KeyframeImage
 import com.ma7moud.reality3d.scan.KeyframeSelector
 import com.ma7moud.reality3d.scan.ScanBox
@@ -153,6 +154,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private val framesSkippedForAnchor = AtomicInteger()
     @Volatile private var depthSize: String? = null
     @Volatile private var cameraSize: String? = null
+    @Volatile private var cameraChoices: String? = null
     @Volatile private var surfaceFoundAfterMs: Long? = null
     private val startedAt = SystemClock.uptimeMillis()
 
@@ -197,7 +199,9 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
 
     override val details: String
         get() = buildString {
-            append("ARCore camera ${cameraSize ?: "?"}, depth map ${depthSize ?: "none yet"}")
+            append("ARCore camera ${cameraSize ?: "?"}")
+            cameraChoices?.let { append(" (this phone offers $it)") }
+            append(", depth map ${depthSize ?: "none yet"}")
             append(" · depth maps used: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
             append(" · frames skipped while the box anchor was lost: ${framesSkippedForAnchor.get()}")
             append(" · surface found: ${surfaceFoundAfterMs?.let { "after ${it / 1000} s" } ?: "no"}")
@@ -309,6 +313,11 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             ScanQuality.assess(coverage.covered.copyOf(), photos.size, depthFrames.get(), if (qualityCount > 0) (qualitySum / qualityCount).toFloat() else null)
         }
         ScanCapture(mesh, photos, quality)
+    }
+
+    override suspend fun photoSet(): PhotoSet? = withContext(Dispatchers.Default) {
+        encoder.submit {}.get()
+        keyframes.toList().takeIf { it.isNotEmpty() }?.let { PhotoSet(it, box) }
     }
 
     override fun close() {
@@ -778,6 +787,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         if (best != null) session.cameraConfig = best
         val used = session.cameraConfig
         cameraSize = "${used.imageSize.width}×${used.imageSize.height}"
+        cameraChoices = candidates.map { "${it.imageSize.width}×${it.imageSize.height}" }.distinct().joinToString(", ")
     }
 
     private fun decode(photo: Keyframe): KeyframeImage? {

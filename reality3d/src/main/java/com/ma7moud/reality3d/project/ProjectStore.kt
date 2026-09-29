@@ -13,7 +13,11 @@ import java.io.File
 import java.io.IOException
 import java.util.UUID
 
-enum class ProjectKind { PHOTO, SCAN, AI }
+/**
+ * How a model was made: from one photo, a 360° scan, an image-to-3D AI, photogrammetry from many photos on the
+ * user's computer, or opened from a file another app made.
+ */
+enum class ProjectKind { PHOTO, SCAN, AI, PHOTOGRAMMETRY, IMPORTED }
 
 /** A saved model as listed in the gallery. */
 class ProjectInfo(

@@ -18,6 +18,9 @@ if not exist ".venv\Scripts\python.exe" (
 )
 ".venv\Scripts\python.exe" -m pip install --quiet --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto nolibs
+rem The photo builder is optional: the server still starts without it.
+".venv\Scripts\python.exe" -m pip install --quiet --disable-pip-version-check -r requirements-photos.txt
+if errorlevel 1 echo Note: the photo builder (3D from many photos) couldn't be installed here; the rest works.
 
 ".venv\Scripts\python.exe" run.py
 echo.
