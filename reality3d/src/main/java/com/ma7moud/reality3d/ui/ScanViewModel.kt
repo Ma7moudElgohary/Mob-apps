@@ -5,11 +5,13 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ma7moud.reality3d.Reality3DApplication
+import com.ma7moud.reality3d.diagnostics.AppInfo
 import com.ma7moud.reality3d.export.ExportFile
 import com.ma7moud.reality3d.export.ExportFormat
 import com.ma7moud.reality3d.export.Exporter
@@ -18,6 +20,7 @@ import com.ma7moud.reality3d.project.ProjectDraft
 import com.ma7moud.reality3d.project.ProjectKind
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
+import com.ma7moud.reality3d.scan.ScanLog
 import com.ma7moud.reality3d.scan.ScanSupport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -71,6 +74,10 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
     var engine: ScanEngine? = null
         private set
 
+    /** What this scan went through, for the report the user can copy. */
+    private var log = ScanLog()
+    private var logJob: Job? = null
+    private var lastDetails = ""
     private var installRequested = false
     private var checkJob: Job? = null
     private var buildJob: Job? = null
@@ -91,7 +98,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             repeat(CHECK_ATTEMPTS) {
                 when (val support = factory.check(activity, userRequestedInstall = !installRequested)) {
                     ScanSupport.Ready -> {
-                        if (engine == null) engine = factory.create(getApplication())
+                        if (engine == null) engine = factory.create(getApplication()).also { watch(it) }
                         _screen.value = ScanScreenState.Scanning
                         return@launch
                     }
@@ -119,9 +126,11 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         if (_screen.value != ScanScreenState.Scanning) return
         _screen.value = ScanScreenState.Building("Getting ready…")
         buildJob = viewModelScope.launch {
+            val started = SystemClock.elapsedRealtime()
             try {
                 // Progress keeps coming from the worker thread; it must not bring back a scan that was cancelled.
                 val capture = current.build { label -> _screen.update { if (it is ScanScreenState.Building) ScanScreenState.Building(label) else it } }
+                log.onBuilt((SystemClock.elapsedRealtime() - started) / 1000f, capture.quality, capture.mesh.triangleCount)
                 // The engine stays open (its camera paused) so more views can be added to this scan.
                 _screen.value = ScanScreenState.Result(capture)
             } catch (e: CancellationException) {
@@ -129,6 +138,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 ensureActive()
                 Log.w(TAG, "Building the scan failed", e)
+                log.onBuildFailed("${e.javaClass.simpleName}: ${e.message}")
                 release()
                 _screen.value = ScanScreenState.Failed("Couldn't build the model: ${e.message ?: e.javaClass.simpleName}.")
             }
@@ -140,6 +150,7 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
         val current = engine ?: return
         if (_screen.value !is ScanScreenState.Result) return
         _message.value = null
+        log.event("Added more views")
         current.continueScanning()
         _screen.value = ScanScreenState.Scanning
     }
@@ -162,11 +173,24 @@ class ScanViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun release() {
         engine?.let {
+            lastDetails = it.details
             it.pause()
             it.close()
         }
         engine = null
+        logJob?.cancel()
     }
+
+    /** Starts a fresh log for a new scan and feeds it what the engine reports. */
+    private fun watch(scan: ScanEngine) {
+        log = ScanLog()
+        lastDetails = ""
+        logJob?.cancel()
+        logJob = viewModelScope.launch { scan.status.collect { log.onStatus(it) } }
+    }
+
+    /** What happened in this scan, as text to copy: the phone, what the camera and depth gave, warnings, the build. */
+    fun scanReport(): String = log.report(AppInfo.header(getApplication()), engine?.details ?: lastDetails)
 
     override fun onCleared() = release()
 

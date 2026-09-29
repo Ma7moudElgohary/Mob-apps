@@ -39,6 +39,29 @@ object ScanCoach {
     const val LOW_DEPTH = 0.25f
     private const val RING_TARGET = 0.75f
 
+    /**
+     * The walks around the object that are enough for a good model: at its height and from about 45° above. The
+     * high walk and the view from above only clean up the top, so they are offered, not asked for.
+     */
+    const val MAIN_LAPS = 2
+
+    /** Both main laps are covered: a model built now is good. */
+    fun isEnough(coverage: BooleanArray): Boolean = (0 until MAIN_LAPS).all { ringFraction(coverage, it) >= RING_TARGET }
+
+    /** How far the walk has got, for a progress bar: 0 to 1 over the main laps. */
+    fun progress(coverage: BooleanArray): Float =
+        (0 until MAIN_LAPS).sumOf { (ringFraction(coverage, it) / RING_TARGET).coerceAtMost(1f).toDouble() }.toFloat() / MAIN_LAPS
+
+    /** The lap being walked, from 1: the first main lap not yet covered, or [MAIN_LAPS] + 1 for the optional ones. */
+    fun currentLap(coverage: BooleanArray): Int =
+        (0 until MAIN_LAPS).firstOrNull { ringFraction(coverage, it) < RING_TARGET }?.plus(1) ?: (MAIN_LAPS + 1)
+
+    /** Sides of lap [lap] (from 1) covered so far, and how many it has. */
+    fun sidesCovered(coverage: BooleanArray, lap: Int): Pair<Int, Int> {
+        val ring = (lap - 1).coerceIn(0, CoverageTracker.RINGS - 1)
+        return (0 until CoverageTracker.SEGMENTS).count { coverage[ring * CoverageTracker.SEGMENTS + it] } to CoverageTracker.SEGMENTS
+    }
+
     /** Closer than this, depth gets unreliable and the object overflows the frame. */
     fun nearLimit(boxSize: Float): Float = max(0.2f, boxSize * 0.9f)
 
@@ -65,6 +88,9 @@ object ScanCoach {
                 "Scan complete. Tap Build model, or first add a view from straight above for a cleaner top."
             }
             return CoachTip(text, CoachTip.Kind.DONE)
+        }
+        if (isEnough(input.coverage)) {
+            return CoachTip("That's enough. Tap Build model, or go around once more with the phone higher for a cleaner top.", CoachTip.Kind.DONE)
         }
         return CoachTip(direction(input), CoachTip.Kind.INFO)
     }

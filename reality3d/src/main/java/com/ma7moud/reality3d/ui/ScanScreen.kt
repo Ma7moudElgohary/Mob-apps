@@ -3,6 +3,8 @@ package com.ma7moud.reality3d.ui
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -15,9 +17,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -27,14 +31,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -45,8 +54,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -54,7 +67,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -74,12 +90,16 @@ import com.ma7moud.reality3d.scan.CoverageTracker
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanCoach
+import com.ma7moud.reality3d.scan.ScanGuide
 import com.ma7moud.reality3d.scan.ScanPhase
 import com.ma7moud.reality3d.scan.ScanStatus
+import com.ma7moud.reality3d.scan.VoiceGuide
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -119,7 +139,9 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (val state = screen) {
-            ScanScreenState.Scanning -> viewModel.engine?.let { CameraScan(it, onBuild = viewModel::build, onRetry = { retry() }, onClose = { close() }) }
+            ScanScreenState.Scanning -> viewModel.engine?.let {
+                CameraScan(it, onBuild = viewModel::build, onRetry = { retry() }, onClose = { close() }, report = viewModel::scanReport)
+            }
             is ScanScreenState.Building -> Centered(onClose = null) {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(16.dp))
@@ -166,9 +188,27 @@ fun ScanScreen(viewModel: ScanViewModel, useGlViewer: Boolean, onClose: () -> Un
                 Text(state.message, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { retry() }) { Text("Scan again") }
+                CopyReportButton(viewModel::scanReport)
             }
         }
     }
+}
+
+/** Copies the scan report to the clipboard, so it can be pasted into a message about a scan that went wrong. */
+@Composable
+private fun CopyReportButton(report: () -> String, color: Color = Color.Unspecified) {
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) {
+            delay(2500)
+            copied = false
+        }
+    }
+    TextButton(onClick = {
+        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Reality3D scan report", report()))
+        copied = true
+    }) { Text(if (copied) "Report copied" else "Copy report", color = color) }
 }
 
 @Composable
@@ -184,7 +224,7 @@ private fun Centered(onClose: (() -> Unit)?, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit, onClose: () -> Unit) {
+private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit, onClose: () -> Unit, report: () -> String) {
     val status by engine.status.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, engine) {
@@ -201,6 +241,60 @@ private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> U
             engine.pause()
         }
     }
+    val context = LocalContext.current
+    val preferences = remember { ScanPreferences(context) }
+    var voiceOn by remember { mutableStateOf(preferences.voice) }
+    var showTips by remember { mutableStateOf(!preferences.tipsSeen) }
+
+    // Leaving or starting over drops the scan, so once there is something worth keeping the person is asked first.
+    var confirm by remember { mutableStateOf<Confirm?>(null) }
+    val worthKeeping = status.phase == ScanPhase.SCANNING && status.coverageFraction >= WORTH_KEEPING
+    fun leave() {
+        if (worthKeeping) confirm = Confirm.LEAVE else onClose()
+    }
+    fun restart() {
+        if (worthKeeping) confirm = Confirm.RESTART else engine.restart()
+    }
+    BackHandler {
+        if (showTips) {
+            showTips = false
+            preferences.tipsSeen = true
+        } else {
+            leave()
+        }
+    }
+
+    // The guidance is said out loud too, so the person can keep their eyes on the object while they walk.
+    val guidance = ScanGuide.guidance(status)
+    val voice = remember { CoachVoice(context) }
+    DisposableEffect(voice) { onDispose { voice.close() } }
+    val voiceGuide = remember(voice) { VoiceGuide(say = voice::say) }
+    val latestGuidance by rememberUpdatedState(guidance)
+    LaunchedEffect(voiceOn, showTips, voiceGuide) {
+        // The how-to card is read, not listened to.
+        if (voiceOn && !showTips) {
+            while (true) {
+                voiceGuide.onGuidance(latestGuidance)
+                delay(300)
+            }
+        } else {
+            voice.stop()
+        }
+    }
+
+    // A tap of the phone for every new side covered, and a longer one when the scan is enough to build.
+    val haptics = LocalHapticFeedback.current
+    val coveredSides = status.coverage.count { it }
+    val enough = ScanCoach.isEnough(status.coverage)
+    var previousSides by remember { mutableIntStateOf(coveredSides) }
+    var wasEnough by remember { mutableStateOf(enough) }
+    LaunchedEffect(coveredSides, enough) {
+        if (enough && !wasEnough) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        else if (coveredSides > previousSides) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        previousSides = coveredSides
+        wasEnough = enough
+    }
+
     Box(Modifier.fillMaxSize()) {
         AndroidView(factory = { engine.createView(it) }, modifier = Modifier.fillMaxSize())
         Column(
@@ -208,98 +302,212 @@ private fun CameraScan(engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> U
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onClose) { Text("Close", color = Color.White) }
+                TextButton(onClick = { leave() }) { Text("Close", color = Color.White) }
                 Spacer(Modifier.weight(1f))
-                Text("360° scan", color = Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 12.dp))
+                TextButton(onClick = { showTips = true }) { Text("Tips", color = Color.White) }
+                TextButton(onClick = {
+                    voiceOn = !voiceOn
+                    preferences.voice = voiceOn
+                }) { Text(if (voiceOn) "Voice: on" else "Voice: off", color = Color.White) }
+                CopyReportButton(report, color = Color.White)
             }
-            Instructions(status)
+            GuidanceCard(status, rememberStableTip(guidance))
             Spacer(Modifier.weight(1f))
-            ScanPanel(status, engine, onBuild, onRetry)
+            ScanPanel(status, engine, onBuild, onRetry, onRestart = { restart() })
         }
+        if (showTips) {
+            TipsCard(onDone = {
+                showTips = false
+                preferences.tipsSeen = true
+            })
+        }
+    }
+    confirm?.let { what ->
+        val leaving = what == Confirm.LEAVE
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(if (leaving) "Leave the scan?" else "Start over?") },
+            text = { Text("What you have scanned so far will be lost.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirm = null
+                    if (leaving) onClose() else engine.restart()
+                }) { Text(if (leaving) "Leave" else "Start over") }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Keep scanning") } },
+        )
     }
 }
 
+private enum class Confirm { LEAVE, RESTART }
+
+/** Coverage from which the scan is worth asking about before it is thrown away. */
+private const val WORTH_KEEPING = 0.15f
+
+/**
+ * The tip to show: a new one appears once it has lasted a moment, so advice that flickers as the phone moves
+ * doesn't flicker on the screen.
+ */
 @Composable
-private fun Instructions(status: ScanStatus) {
-    val text = when (status.phase) {
-        ScanPhase.STARTING, ScanPhase.FIND_SURFACE ->
-            "Point the camera at the table around the object and move the phone slowly so it can find the surface."
-        ScanPhase.PLACE_BOX -> "Tap the object."
-        ScanPhase.READY -> "Make the box a little bigger than the object, then start. Tap the object again to move the box."
-        ScanPhase.SCANNING -> when (status.nextStep) {
-            CoverageTracker.Step.LOW_RING -> "Walk slowly around the object, holding the phone at about its height."
-            CoverageTracker.Step.MIDDLE_RING -> "Now hold the phone higher and go around again, looking down at 45°."
-            CoverageTracker.Step.HIGH_RING -> "Hold the phone high and go around once more."
-            CoverageTracker.Step.TOP -> "Finish with a view from straight above the object."
-            CoverageTracker.Step.DONE -> "Every side is covered. Tap Build model."
-        }
-        ScanPhase.BUILDING -> "Building…"
-        ScanPhase.FAILED -> status.message ?: "Scanning stopped."
+private fun rememberStableTip(tip: CoachTip): CoachTip {
+    var shown by remember { mutableStateOf(tip) }
+    LaunchedEffect(tip.text, tip.kind) {
+        if (tip.text != shown.text) delay(TIP_HOLD_MS)
+        shown = tip
     }
-    val coach = status.coach
+    return shown
+}
+
+private const val TIP_HOLD_MS = 700L
+
+/** The one thing to do now, big, with the step the scan is at. */
+@Composable
+private fun GuidanceCard(status: ScanStatus, tip: CoachTip) {
+    val step = ScanGuide.step(status.phase)
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Panel).padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Panel).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (coach != null) {
-            // The coach already leads with any tracking problem.
-            Text(
-                coach.text,
-                color = when (coach.kind) {
-                    CoachTip.Kind.WARNING -> Warning
-                    CoachTip.Kind.DONE -> Covered
-                    CoachTip.Kind.INFO -> Color.White
-                },
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-        } else {
-            status.trackingProblem?.let { Text(it, color = Warning, fontWeight = FontWeight.SemiBold) }
-            Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        if (step > 0) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (number in 1..ScanGuide.STEPS) {
+                    Box(
+                        Modifier
+                            .size(if (number == step) 10.dp else 8.dp)
+                            .clip(CircleShape)
+                            .background(if (number <= step) Covered else Color.White.copy(alpha = 0.25f)),
+                    )
+                }
+                Spacer(Modifier.width(4.dp))
+                Text("Step $step of ${ScanGuide.STEPS} · ${ScanGuide.STEP_TITLES[step - 1]}", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.labelLarge)
+            }
         }
-        if (status.phase != ScanPhase.FAILED) status.message?.let { Text(it, color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall) }
+        Text(
+            tip.text,
+            color = when (tip.kind) {
+                CoachTip.Kind.WARNING -> Warning
+                CoachTip.Kind.DONE -> Covered
+                CoachTip.Kind.INFO -> Color.White
+            },
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+        )
+        if (status.phase != ScanPhase.FAILED) status.message?.let { Text(it, color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodyMedium) }
     }
 }
 
+/** How to scan, in a few plain lines; shown the first time and from the Tips button. */
 @Composable
-private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit) {
+private fun TipsCard(onDone: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.7f))
+            // Taps on the dimmed camera don't reach the buttons underneath.
+            .pointerInput(Unit) { detectTapGestures { } }
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Color(0xFF101827)).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("How to scan", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color.White)
+            for ((number, text) in TIPS.withIndex()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("${number + 1}", color = Covered, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                    Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+                }
+            }
+            Text(
+                "The phone talks you through it out loud and taps when a new side is covered. Voice can be turned off at the top.",
+                color = Color(0xFFB8C4D9),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Button(onClick = onDone, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Got it") }
+        }
+    }
+}
+
+private val TIPS = listOf(
+    "Put the object on a table, on a newspaper or a patterned cloth, in good light.",
+    "Point the phone at it and tap the object. Pick a size so the green box is a little bigger than the object.",
+    "Walk slowly around it, keeping it in view, about an arm's length away. Do it twice: first with the phone at the object's height, then a bit higher, looking down.",
+    "When the phone says that's enough, tap Build model. Going around once more, higher, cleans up the top.",
+)
+
+/** Object sizes to start from: what the person can picture is easier than centimetres. */
+private val SIZE_PRESETS = listOf("Small · in a hand" to 0.2f, "Medium · shoebox" to 0.4f, "Large · a chair" to 0.8f)
+
+@Composable
+private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Unit, onRetry: () -> Unit, onRestart: () -> Unit) {
     when (status.phase) {
         ScanPhase.READY -> Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Panel).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row {
-                Text("Box size", color = Color.White, modifier = Modifier.weight(1f))
+                Text("Object size", color = Color.White, modifier = Modifier.weight(1f))
                 Text("${(status.boxSize * 100).roundToInt()} cm", color = Color(0xFFB8C4D9))
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((label, size) in SIZE_PRESETS) {
+                    FilterChip(
+                        selected = abs(status.boxSize - size) < 0.03f,
+                        onClick = { engine.setBoxSize(size) },
+                        label = { Text(label) },
+                    )
+                }
             }
             Slider(
                 value = status.boxSize,
                 onValueChange = engine::setBoxSize,
                 valueRange = ScanStatus.MIN_BOX_SIZE..ScanStatus.MAX_BOX_SIZE,
             )
-            Button(onClick = engine::startScanning, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("Start scan") }
+            Text("Tap the object again to move the box.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+            Button(onClick = engine::startScanning, modifier = Modifier.fillMaxWidth().height(56.dp)) { Text("Start scan") }
         }
         ScanPhase.SCANNING -> Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Panel).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                CoverageRadar(status, Modifier.size(112.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            val enough = ScanCoach.isEnough(status.coverage)
+            val lap = ScanCoach.currentLap(status.coverage)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                CoverageRadar(status, Modifier.size(96.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val (done, sides) = ScanCoach.sidesCovered(status.coverage, lap)
                     val complete = status.coverageFraction >= ScanCoach.COMPLETE
                     Text(
-                        (if (complete) "Complete · " else "Covered ") + "${(status.coverageFraction * 100).roundToInt()}%",
-                        color = if (complete) Covered else Color.White,
+                        when {
+                            complete -> "Everything is covered"
+                            enough -> "Enough to build"
+                            else -> "Lap $lap of ${ScanCoach.MAIN_LAPS} · $done of $sides sides"
+                        },
+                        color = if (enough) Covered else Color.White,
                         style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
                     )
+                    LinearProgressIndicator(
+                        progress = { ScanCoach.progress(status.coverage) },
+                        modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                        color = if (enough) Covered else MaterialTheme.colorScheme.primary,
+                        trackColor = Color.White.copy(alpha = 0.18f),
+                    )
+                    Text("Covered ${(status.coverageFraction * 100).roundToInt()}%", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
                     Text("${status.photos} photos · ${status.depthFrames} depth maps", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
-                    Text("Outer ring: low views. Centre: from above. The white dot is you.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
                 }
             }
             val canBuild = status.coverageFraction >= MIN_COVERAGE && status.depthFrames > 0
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = engine::restart, modifier = Modifier.weight(1f)) { Text("Restart") }
-                Button(onClick = onBuild, enabled = canBuild, modifier = Modifier.weight(1f)) { Text("Build model") }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = onRestart, modifier = Modifier.weight(0.4f).height(52.dp)) { Text("Restart") }
+                Button(
+                    onClick = onBuild,
+                    enabled = canBuild,
+                    modifier = Modifier.weight(0.6f).height(56.dp),
+                    colors = if (enough) ButtonDefaults.buttonColors(containerColor = Covered, contentColor = Color(0xFF07130D)) else ButtonDefaults.buttonColors(),
+                ) { Text("Build model", style = MaterialTheme.typography.titleMedium) }
             }
             if (!canBuild) Text("Go around at least once before building.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
         }
@@ -465,6 +673,7 @@ private fun ScanResult(
             onSave = { format, budget -> save(format, budget) },
         )
         OutlinedButton(onClick = onScanAgain, modifier = Modifier.fillMaxWidth()) { Text("Scan something else") }
+        CopyReportButton(viewModel::scanReport)
         Spacer(Modifier.height(8.dp))
     }
 }

@@ -85,6 +85,20 @@ class CutOutTest {
     }
 
     @Test
+    fun onAPhoneKnownToCrashSegmentAnythingIsUsedWithoutAnyCrashFirst() = runBlocking {
+        val mlKit = Engine("mlkit")
+        val sam = Engine("sam", canPick = true)
+        val blocked = Diagnostics(context, model = "SM-S948B") { emptyList() }
+        val cut = CutOut(mlKit, sam, Model(isReady = true), blocked)
+        assertTrue(cut.canPick)
+        cut.segment(photo) { _, _ -> }
+        assertEquals(listOf("sam.segment"), sam.calls)
+        assertTrue(mlKit.calls.isEmpty())
+        // Before Segment Anything is downloaded ML Kit's own slot answers "nothing", without touching ML Kit.
+        assertNull(MlKitSubjectMasker(context, blocked).segment(photo) { _, _ -> })
+    }
+
+    @Test
     fun withoutTheDownloadOrAfterItCrashesTooTheOldWayIsKept() = runBlocking {
         val mlKit = Engine("mlkit")
         val sam = Engine("sam", canPick = true)

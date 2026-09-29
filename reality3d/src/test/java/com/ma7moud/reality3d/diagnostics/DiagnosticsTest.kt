@@ -51,6 +51,37 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun aPhoneModelKnownToCrashKeepsThatFeatureOffWithoutAnyCrashHere() {
+        val s26 = Diagnostics(context, model = "SM-S948B") { emptyList() }
+        assertTrue(s26.isOff(Fallback.ONE_OBJECT))
+        assertEquals(listOf(Fallback.ONE_OBJECT), s26.turnedOff)
+        assertNull(s26.report)
+        assertFalse(s26.isOff(Fallback.NO_SAM))
+        // Turning features back on can't bring it back: it would only crash again.
+        assertFalse(s26.canTurnBackOn)
+        s26.turnAllBackOn()
+        assertTrue(s26.isOff(Fallback.ONE_OBJECT))
+        // The model is matched whatever its case; other phones are untouched.
+        assertTrue(Diagnostics(context, model = "sm-s948b") { emptyList() }.isOff(Fallback.ONE_OBJECT))
+        val other = Diagnostics(context, model = "Pixel 9") { emptyList() }
+        assertFalse(other.isOff(Fallback.ONE_OBJECT))
+        assertTrue(other.turnedOff.isEmpty())
+    }
+
+    @Test
+    fun turningBackOnOnlyTouchesWhatACrashTurnedOff() {
+        // A crash in the GPU depth model on the phone that also can't use ML Kit.
+        diedDuring(Step.DEPTH_GPU)
+        val diagnostics = Diagnostics(context, model = "SM-S948B") { listOf(exit(ExitKind.NATIVE_CRASH)) }
+        assertTrue(diagnostics.isOff(Fallback.NO_DEPTH_GPU))
+        assertTrue(diagnostics.canTurnBackOn)
+        diagnostics.turnAllBackOn()
+        assertFalse(diagnostics.isOff(Fallback.NO_DEPTH_GPU))
+        assertTrue(diagnostics.isOff(Fallback.ONE_OBJECT))
+        assertFalse(diagnostics.canTurnBackOn)
+    }
+
+    @Test
     fun aStepLeftByANormalExitIsNotACrash() {
         diedDuring(Step.DEPTH_GPU)
         val diagnostics = Diagnostics(context) { listOf(exit(ExitKind.OTHER, foreground = false)) }

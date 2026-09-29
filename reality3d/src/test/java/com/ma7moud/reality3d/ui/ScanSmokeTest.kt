@@ -68,7 +68,8 @@ internal class FakeScanEngine : ScanEngine {
     }
 
     override fun startScanning() {
-        val coverage = BooleanArray(CoverageTracker.CELLS) { it < 22 }
+        // The first lap done and a little of the second.
+        val coverage = BooleanArray(CoverageTracker.CELLS) { it < 15 }
         _status.value = ScanStatus(
             phase = ScanPhase.SCANNING,
             coverage = coverage,
@@ -126,7 +127,13 @@ class ScanSmokeTest {
     @Before
     fun setUp() {
         forgetFileProviderFolders()
-        shadowOf(ApplicationProvider.getApplicationContext<Application>()).grantPermissions(Manifest.permission.CAMERA)
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
+        // The how-to card has been read, except in the test that looks at it.
+        ScanPreferences(app).apply {
+            tipsSeen = true
+            voice = true
+        }
     }
 
     private fun waitFor(condition: () -> Boolean) {
@@ -146,12 +153,16 @@ class ScanSmokeTest {
         waitForText("Start scan")
         val engine = FakeScanner.engine!!
         assertTrue(engine.resumes > 0)
-        compose.onNodeWithText("Box size").assertIsDisplayed()
+        compose.onNodeWithText("Object size").assertIsDisplayed()
+        compose.onNodeWithText("Step 3 of 4 · Set the size").assertIsDisplayed()
         compose.onNodeWithText("Start scan").performClick()
 
         waitForText("Covered 60%")
         compose.onNodeWithText("24 photos · 73 depth maps").assertIsDisplayed()
-        compose.onNodeWithText("Now hold the phone higher and go around again, looking down at 45°.").assertIsDisplayed()
+        // The first lap is done and the second has begun; the instruction follows a moment later, once it has held.
+        compose.onNodeWithText("Lap 2 of 2 · 3 of 12 sides").assertIsDisplayed()
+        waitForText("Now hold the phone a bit higher, looking down at 45°, and go around again.")
+        compose.onNodeWithText("Step 4 of 4 · Walk around it").assertIsDisplayed()
         // The coach takes over when the engine has advice.
         compose.runOnUiThread {
             engine.emit(
@@ -198,6 +209,118 @@ class ScanSmokeTest {
         assertTrue(send.getStringExtra(Intent.EXTRA_TITLE)!!.endsWith("_photos.zip"))
 
         compose.onNodeWithText("Done").performScrollTo().performClick()
+        waitForText("Start 360° scan")
+        assertTrue(engine.closed)
+    }
+
+    @Test
+    fun theScanReportCanBeCopiedWhileScanningAndAfterwards() {
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("Start scan")
+        compose.onNodeWithText("Start scan").performClick()
+        waitForText("Covered 60%")
+        val clipboard = ApplicationProvider.getApplicationContext<Application>().getSystemService(android.content.ClipboardManager::class.java)
+
+        compose.onNodeWithText("Copy report").performClick()
+        compose.onNodeWithText("Report copied").assertIsDisplayed()
+        val duringScan = clipboard.primaryClip!!.getItemAt(0).text.toString()
+        assertTrue(duringScan, duringScan.startsWith("Reality3D "))
+        assertTrue(duringScan, duringScan.contains("Timeline"))
+        assertTrue(duringScan, duringScan.contains("scanning"))
+        assertTrue(duringScan, duringScan.contains("60% covered, 24 photos, 73 depth maps"))
+
+        compose.onNodeWithText("Build model").performClick()
+        waitForText("Your scan")
+        compose.onNodeWithText("Copy report").performScrollTo().performClick()
+        val afterwards = clipboard.primaryClip!!.getItemAt(0).text.toString()
+        assertTrue(afterwards, afterwards.contains("Built in "))
+        assertTrue(afterwards, afterwards.contains("quality "))
+    }
+
+    @Test
+    fun theHowToCardShowsTheFirstTimeAndFromTheTipsButton() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        ScanPreferences(app).tipsSeen = false
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("How to scan")
+        compose.onNodeWithText("Walk slowly around it", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Got it").performClick()
+        compose.onNodeWithText("How to scan").assertDoesNotExist()
+        assertTrue(ScanPreferences(app).tipsSeen)
+        // It doesn't come back by itself, but the Tips button opens it again.
+        compose.onNodeWithText("Tips").performClick()
+        compose.onNodeWithText("How to scan").assertIsDisplayed()
+        compose.onNodeWithText("Got it").performClick()
+        compose.onNodeWithText("How to scan").assertDoesNotExist()
+    }
+
+    @Test
+    fun theSizeIsChosenFromPicturesOfObjectsAndTheVoiceCanBeTurnedOff() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("Start scan")
+        compose.onNodeWithText("Medium · shoebox").assertIsDisplayed()
+        compose.onNodeWithText("40 cm").assertIsDisplayed()
+        compose.onNodeWithText("Small · in a hand").performClick()
+        compose.onNodeWithText("20 cm").assertIsDisplayed()
+        compose.onNodeWithText("Large · a chair").performClick()
+        compose.onNodeWithText("80 cm").assertIsDisplayed()
+
+        compose.onNodeWithText("Voice: on").performClick()
+        compose.onNodeWithText("Voice: off").assertIsDisplayed()
+        assertEquals(false, ScanPreferences(app).voice)
+        compose.onNodeWithText("Voice: off").performClick()
+        compose.onNodeWithText("Voice: on").assertIsDisplayed()
+        assertEquals(true, ScanPreferences(app).voice)
+    }
+
+    @Test
+    fun theScanTellsWhenItIsEnoughToBuild() {
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("Start scan")
+        val engine = FakeScanner.engine!!
+        compose.onNodeWithText("Start scan").performClick()
+        waitForText("Covered 60%")
+
+        // Nine of twelve sides of both main laps: enough, whatever the top and the high lap look like.
+        val twoLaps = BooleanArray(CoverageTracker.CELLS) { it % CoverageTracker.SEGMENTS < 9 && it < 2 * CoverageTracker.SEGMENTS }
+        compose.runOnUiThread {
+            engine.emit(ScanStatus(phase = ScanPhase.SCANNING, coverage = twoLaps, coverageFraction = 0.49f, photos = 30, depthFrames = 50))
+        }
+        waitForText("Enough to build")
+        compose.onNodeWithText("Build model").assertIsEnabled()
+    }
+
+    @Test
+    fun leavingOrStartingOverAsksFirstOnceThereIsSomethingToLose() {
+        compose.onNodeWithText("Start 360° scan").performClick()
+        waitForText("Start scan")
+        val engine = FakeScanner.engine!!
+        compose.onNodeWithText("Start scan").performClick()
+        waitForText("Covered 60%")
+
+        compose.onNodeWithText("Restart").performClick()
+        compose.onNodeWithText("Start over?").assertIsDisplayed()
+        compose.onNodeWithText("Keep scanning").performClick()
+        compose.onNodeWithText("Start over?").assertDoesNotExist()
+        compose.onNodeWithText("Covered 60%").assertIsDisplayed()
+
+        compose.onNodeWithText("Close").performClick()
+        compose.onNodeWithText("Leave the scan?").assertIsDisplayed()
+        compose.onNodeWithText("Keep scanning").performClick()
+        compose.onNodeWithText("Covered 60%").assertIsDisplayed()
+
+        // Starting over goes back to placing the box.
+        compose.onNodeWithText("Restart").performClick()
+        compose.onNodeWithText("Start over").performClick()
+        waitForText("Start scan")
+
+        // A scan that has hardly begun is dropped without asking.
+        compose.onNodeWithText("Start scan").performClick()
+        waitForText("Covered 60%")
+        compose.runOnUiThread { engine.emit(ScanStatus(phase = ScanPhase.SCANNING, coverageFraction = 0.05f, depthFrames = 1)) }
+        waitForText("Covered 5%")
+        compose.onNodeWithText("Close").performClick()
         waitForText("Start 360° scan")
         assertTrue(engine.closed)
     }

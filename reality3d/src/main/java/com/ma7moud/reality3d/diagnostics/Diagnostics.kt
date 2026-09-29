@@ -10,9 +10,6 @@ import androidx.core.content.edit
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -63,6 +60,20 @@ class ExitRecord(
 }
 
 /**
+ * What is known to crash the app on one phone model, so it isn't tried there even on a fresh install or after the
+ * user turns features back on. Found from crash reports: the model, what crashed and where.
+ */
+internal class KnownCrash(val model: String, val fallback: Fallback, val evidence: String)
+
+internal val KNOWN_CRASHES = listOf(
+    KnownCrash(
+        "SM-S948B", Fallback.ONE_OBJECT,
+        "Galaxy S26 Ultra, Android 16: SIGSEGV on ML Kit's GPU thread drishti_gl_runn, in Google Play services' " +
+            "MlkitSubjectSegmentation module, on every photo (0.5.81 and 0.5.82).",
+    ),
+)
+
+/**
  * Keeps the app usable after a crash and says why it happened.
  *
  * Native work that no try/catch can guard (ML Kit, the GPU, the NPU) runs [during] a [Step] that is written to
@@ -73,9 +84,13 @@ class ExitRecord(
  */
 class Diagnostics(
     context: Context,
+    /** The phone's model, to skip what is known to crash on it; this phone's when null. */
+    model: String? = null,
     /** Android's exit records, newest first; null where Android doesn't keep them. */
     private val exits: () -> List<ExitRecord>? = { exitRecords(context) },
 ) {
+    private val modelOverride = model
+    private val model: String get() = modelOverride ?: Build.MODEL
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val crashFile = File(appContext.filesDir, CRASH_FILE)
@@ -90,13 +105,23 @@ class Diagnostics(
             return synchronized(lock) { pending }
         }
 
+    /** Whether [fallback]'s feature is off: after a crash here, or because it is known to crash on this phone model. */
     fun isOff(fallback: Fallback): Boolean {
         check()
-        return prefs.getBoolean(fallback.key, false)
+        return prefs.getBoolean(fallback.key, false) || blockedOnThisPhone(fallback)
     }
 
-    /** Features turned off after crashes. */
+    private fun blockedOnThisPhone(fallback: Fallback) = KNOWN_CRASHES.any { it.fallback == fallback && it.model.equals(model, ignoreCase = true) }
+
+    /** Features turned off, after crashes or for this phone model. */
     val turnedOff: List<Fallback> get() = Fallback.entries.filter { isOff(it) }
+
+    /** Whether [turnAllBackOn] would turn anything on: what is off only because of this phone model stays off. */
+    val canTurnBackOn: Boolean
+        get() {
+            check()
+            return Fallback.entries.any { prefs.getBoolean(it.key, false) && !blockedOnThisPhone(it) }
+        }
 
     /** Runs [block] as [step], so that if the app dies inside it the next launch knows where. */
     inline fun <T> during(step: Step, block: () -> T): T {
@@ -121,7 +146,7 @@ class Diagnostics(
         synchronized(lock) { pending = null }
     }
 
-    /** Turns every feature back on, for when a crash wasn't the feature's fault. */
+    /** Turns back on what a crash turned off, for when it wasn't the feature's fault; not what is known to crash on this phone. */
     fun turnAllBackOn() {
         prefs.edit { Fallback.entries.forEach { remove(it.key) } }
     }
@@ -208,7 +233,7 @@ class Diagnostics(
             fallbacks.joinToString("") { " ${it.label}" } + " Try again."
         }
         val details = buildString {
-            appendLine(header(crash?.timestamp ?: now))
+            appendLine(AppInfo.header(appContext, crash?.timestamp ?: now))
             appendLine(what + where)
             if (fallbacks.isNotEmpty()) appendLine("Turned off: ${fallbacks.joinToString { it.name }}")
             crash?.description?.takeIf { it.isNotBlank() }?.let { appendLine("Android: $it") }
@@ -219,18 +244,6 @@ class Diagnostics(
             }
         }.trim().take(MAX_REPORT_CHARS)
         return CrashReport(summary, details, fallbacks)
-    }
-
-    private fun header(timestamp: Long): String {
-        val version = try {
-            val info = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
-            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
-            "${info.versionName} ($code)"
-        } catch (e: Exception) {
-            "?"
-        }
-        val time = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(timestamp))
-        return "Reality3D $version · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) · $time"
     }
 
     companion object {

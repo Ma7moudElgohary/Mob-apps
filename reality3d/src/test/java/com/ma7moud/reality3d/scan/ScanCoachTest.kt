@@ -1,6 +1,7 @@
 package com.ma7moud.reality3d.scan
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,9 +52,18 @@ class ScanCoachTest {
     fun movesUpTheRingsThenAsksForTheTop() {
         val lowDone = covered(*IntArray(10) { it })
         assertEquals("Raise the phone and look down at the object.", ScanCoach.advise(input(coverage = lowDone, ring = 0)).text)
-        // Every ring three-quarters done (73% in all) but nothing from above.
+        // Both main laps three-quarters done: enough to build, with the high lap and the top on offer.
+        val twoLaps = covered(*IntArray(2 * CoverageTracker.SEGMENTS) { it }.filter { it % CoverageTracker.SEGMENTS < 9 }.toIntArray())
+        val enough = ScanCoach.advise(input(coverage = twoLaps, ring = 1))
+        assertEquals(CoachTip.Kind.DONE, enough.kind)
+        assertTrue(enough.text, enough.text.startsWith("That's enough. Tap Build model"))
+        assertTrue(enough.text.contains("phone higher"))
+        // Only the first lap and part of the second: the second is still to do.
+        val oneAndABit = covered(*IntArray(CoverageTracker.SEGMENTS + 4) { it })
+        assertFalse(ScanCoach.advise(input(coverage = oneAndABit, ring = 1)).kind == CoachTip.Kind.DONE)
+        // The top is only asked for once the high ring is done too, and it can't hold a scan back from building.
         val ringsDone = covered(*IntArray(3 * CoverageTracker.SEGMENTS) { it }.filter { it % CoverageTracker.SEGMENTS < 9 }.toIntArray())
-        assertTrue(ScanCoach.advise(input(coverage = ringsDone, ring = 1)).text.startsWith("Top view missing"))
+        assertEquals(CoachTip.Kind.DONE, ScanCoach.advise(input(coverage = ringsDone, ring = 1)).kind)
         // Complete without the top: done, with a nudge towards it.
         val ringsFull = covered(*IntArray(3 * CoverageTracker.SEGMENTS) { it })
         val almost = ScanCoach.advise(input(coverage = ringsFull, ring = 1))
@@ -63,6 +73,36 @@ class ScanCoachTest {
         val done = ScanCoach.advise(input(coverage = complete))
         assertEquals(CoachTip.Kind.DONE, done.kind)
         assertEquals("Scan complete. Tap Build model.", done.text)
+    }
+
+    @Test
+    fun twoLapsAreEnoughAndTheProgressFollowsThem() {
+        val none = BooleanArray(CoverageTracker.CELLS)
+        assertFalse(ScanCoach.isEnough(none))
+        assertEquals(0f, ScanCoach.progress(none), 0f)
+        assertEquals(1, ScanCoach.currentLap(none))
+        assertEquals(0 to CoverageTracker.SEGMENTS, ScanCoach.sidesCovered(none, 1))
+
+        // The first lap three-quarters round: its half of the bar is full and the second lap begins.
+        val firstLap = covered(*IntArray(9) { it })
+        assertEquals(0.5f, ScanCoach.progress(firstLap), 1e-6f)
+        assertEquals(2, ScanCoach.currentLap(firstLap))
+        assertEquals(9 to 12, ScanCoach.sidesCovered(firstLap, 1))
+        assertFalse(ScanCoach.isEnough(firstLap))
+
+        // A little short of three-quarters doesn't fill it.
+        val nearly = covered(*IntArray(8) { it })
+        assertTrue(ScanCoach.progress(nearly) < 0.5f)
+        assertEquals(1, ScanCoach.currentLap(nearly))
+
+        val secondLap = covered(*IntArray(9) { it }, *IntArray(9) { CoverageTracker.SEGMENTS + it })
+        assertTrue(ScanCoach.isEnough(secondLap))
+        assertEquals(1f, ScanCoach.progress(secondLap), 1e-6f)
+        // Past the main laps the extra ones are counted after them, and the counts follow that lap's ring.
+        assertEquals(ScanCoach.MAIN_LAPS + 1, ScanCoach.currentLap(secondLap))
+        assertEquals(0 to 12, ScanCoach.sidesCovered(secondLap, 3))
+        // Progress doesn't go beyond the bar when a lap is covered fully.
+        assertEquals(1f, ScanCoach.progress(BooleanArray(CoverageTracker.CELLS) { true }), 1e-6f)
     }
 
     @Test

@@ -326,6 +326,7 @@ private fun Reality3DScreen(
             state.depthDownloadBytes,
             state.depthBackend,
             state.turnedOff,
+            state.canTurnBackOn,
             onGetAi = viewModel::downloadAi,
             onTurnBackOn = viewModel::turnFeaturesBackOn,
         )
@@ -338,6 +339,7 @@ private fun Reality3DScreen(
             onTapSubject = viewModel::tapSubject,
             onUseAll = viewModel::useAllSubjects,
             onEditOutline = viewModel::openEditor,
+            segmentAnythingOffered = state.segmentAnythingOffer != null,
         )
         state.segmentAnythingOffer?.let { bytes -> SegmentAnythingCard(bytes, enabled = !busy, onGet = viewModel::getSegmentAnything) }
         state.photoQuality?.let {
@@ -477,8 +479,8 @@ private fun ScanCard(onScan: () -> Unit) {
                 )
             }
             Text(
-                "Walk around the object with the camera. ARCore measures it as you go, and the phone builds a " +
-                    "closed, coloured model at its real size, in centimetres.",
+                "Put the object on a table and walk slowly around it, twice. The phone talks you through every step, " +
+                    "then builds a closed, coloured model at its real size, in centimetres.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
             )
@@ -496,6 +498,7 @@ private fun StatusCard(
     depthBytes: Long,
     depthBackend: String?,
     turnedOff: List<Fallback>,
+    canTurnBackOn: Boolean,
     onGetAi: () -> Unit,
     onTurnBackOn: () -> Unit,
 ) {
@@ -524,8 +527,8 @@ private fun StatusCard(
             )
             if (turnedOff.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusLine("Safe mode", turnedOff.joinToString { it.shortName } + " off after a crash", Waiting, Modifier.weight(1f))
-                    TextButton(onClick = onTurnBackOn) { Text("Turn on") }
+                    StatusLine("Safe mode", turnedOff.joinToString { it.shortName } + " off on this phone", Waiting, Modifier.weight(1f))
+                    if (canTurnBackOn) TextButton(onClick = onTurnBackOn) { Text("Turn on") }
                 }
             }
         }
@@ -552,6 +555,7 @@ private fun PhotoCard(
     onTapSubject: (Float, Float) -> Unit,
     onUseAll: () -> Unit,
     onEditOutline: () -> Unit,
+    segmentAnythingOffered: Boolean,
 ) {
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -578,7 +582,7 @@ private fun PhotoCard(
             } else {
                 val tappable = enabled && subjects != null && (subjects.count > 1 || subjects.canPick)
                 SubjectPicker(photo, subjects?.overlay, tappable = tappable, onTap = onTapSubject)
-                if (subjects != null) SubjectSummary(subjects, enabled, onUseAll, onEditOutline)
+                if (subjects != null) SubjectSummary(subjects, enabled, segmentAnythingOffered, onUseAll, onEditOutline)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(onClick = onCamera, enabled = enabled, modifier = Modifier.weight(1f)) {
@@ -621,10 +625,12 @@ private fun SubjectPicker(photo: Bitmap, overlay: Bitmap?, tappable: Boolean, on
 }
 
 @Composable
-private fun SubjectSummary(subjects: SubjectsView, enabled: Boolean, onUseAll: () -> Unit, onEditOutline: () -> Unit) {
+private fun SubjectSummary(subjects: SubjectsView, enabled: Boolean, segmentAnythingOffered: Boolean, onUseAll: () -> Unit, onEditOutline: () -> Unit) {
     val text = when {
         subjects.edited -> "Using your edited outline; the dimmed part is left out."
         subjects.count == 0 && subjects.canPick -> "Nothing stood out by itself. Tap the object to cut it out, or paint it in with Edit outline."
+        subjects.count == 0 && segmentAnythingOffered ->
+            "The object wasn't cut out, so the whole photo is used. Get Segment Anything below to cut it out for you, or paint it in with Edit outline."
         subjects.count == 0 -> "Nothing stood out from the background, so the whole photo is used. Paint the object in with Edit outline."
         subjects.count == 1 && subjects.canPick -> "Object found; the dimmed part is left out. Tap anything else to add it."
         subjects.count == 1 -> "Object found; the dimmed part is left out."

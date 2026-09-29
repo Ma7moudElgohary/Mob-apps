@@ -4,6 +4,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Looper
+import android.os.Build
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
@@ -34,6 +35,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.util.ReflectionHelpers
 import java.io.File
 import java.time.Duration
 
@@ -127,10 +129,39 @@ class CrashReportSmokeTest {
 
             compose.onNodeWithText("Close").performClick()
             compose.onNodeWithText("Reality3D closed unexpectedly last time").assertDoesNotExist()
-            compose.onNodeWithText("Google's cut-out off after a crash").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Google's cut-out off on this phone").performScrollTo().assertIsDisplayed()
             compose.onNodeWithText("Turn on").performScrollTo().performClick()
-            compose.onNodeWithText("Google's cut-out off after a crash").assertDoesNotExist()
+            compose.onNodeWithText("Google's cut-out off on this phone").assertDoesNotExist()
             assertFalse(app.diagnostics.isOff(Fallback.ONE_OBJECT))
+        }
+    }
+
+    @Test
+    fun onAPhoneKnownToCrashMlKitIsNeverUsedNotEvenAfterTurnOn() {
+        val model = Build.MODEL
+        ReflectionHelpers.setStaticField(Build::class.java, "MODEL", "SM-S948B")
+        try {
+            val app = ApplicationProvider.getApplicationContext<Reality3DApplication>()
+            ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+                // No crash is needed: this phone model is known to crash in ML Kit, so the offer is there at once.
+                compose.onNodeWithText("Reality3D closed unexpectedly last time").assertDoesNotExist()
+                compose.onNodeWithText("Pick objects with Segment Anything").performScrollTo().assertIsDisplayed()
+                compose.onNodeWithText("Google's cut-out off on this phone").performScrollTo().assertIsDisplayed()
+                // Nothing here can be turned back on: it would only crash again.
+                compose.onNodeWithText("Turn on").assertDoesNotExist()
+                assertTrue(app.diagnostics.isOff(Fallback.ONE_OBJECT))
+
+                compose.onNodeWithText("Get Segment Anything (97 MB, once)").performScrollTo().performClick()
+                waitFor { compose.onAllNodesWithText("Pick objects with Segment Anything").fetchSemanticsNodes().isEmpty() }
+                lateinit var viewModel: Reality3DViewModel
+                scenario.onActivity { viewModel = ViewModelProvider(it)[Reality3DViewModel::class.java] }
+                compose.runOnUiThread { viewModel.setPhoto(Bitmap.createBitmap(320, 240, Bitmap.Config.ARGB_8888)) }
+                waitFor { viewModel.state.value.subjects != null && viewModel.state.value.progress == null }
+                assertTrue(viewModel.state.value.subjects!!.canPick)
+                assertEquals(1, viewModel.state.value.subjects!!.count)
+            }
+        } finally {
+            ReflectionHelpers.setStaticField(Build::class.java, "MODEL", model)
         }
     }
 

@@ -45,6 +45,9 @@ interface ScanEngine {
     /** The camera view to show full screen; taps on it place the scan box. */
     fun createView(context: Context): View
 
+    /** What the engine measured about this phone and scan, for the scan report; empty when it has nothing to say. */
+    val details: String get() = ""
+
     fun setBoxSize(meters: Float)
 
     fun startScanning()

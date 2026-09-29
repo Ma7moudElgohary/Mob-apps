@@ -147,6 +147,15 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private var qualitySum = 0.0
     private var qualityCount = 0
 
+    // For the scan report: which kind of depth came in, and how much was lost to the anchor.
+    private val rawDepthMaps = AtomicInteger()
+    private val smoothedDepthMaps = AtomicInteger()
+    private val framesSkippedForAnchor = AtomicInteger()
+    @Volatile private var depthSize: String? = null
+    @Volatile private var cameraSize: String? = null
+    @Volatile private var surfaceFoundAfterMs: Long? = null
+    private val startedAt = SystemClock.uptimeMillis()
+
     // GL thread only.
     private var cameraTexture = 0
     private var geometry = IntArray(3)
@@ -185,6 +194,21 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
 
     /** Where the user tapped: the object's surface, the camera's spot, and the table under it. */
     private class Tap(val x: Float, val y: Float, val z: Float, val cameraX: Float, val cameraZ: Float, val floorY: Float?)
+
+    override val details: String
+        get() = buildString {
+            append("ARCore camera ${cameraSize ?: "?"}, depth map ${depthSize ?: "none yet"}")
+            append(" · depth maps used: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
+            append(" · frames skipped while the box anchor was lost: ${framesSkippedForAnchor.get()}")
+            append(" · surface found: ${surfaceFoundAfterMs?.let { "after ${it / 1000} s" } ?: "no"}")
+            arCoreVersion()?.let { append(" · Google Play Services for AR $it") }
+        }
+
+    private fun arCoreVersion(): String? = try {
+        context.packageManager.getPackageInfo("com.google.ar.core", 0).versionName
+    } catch (e: Exception) {
+        null
+    }
 
     override fun createView(context: Context): View {
         val created = ArScanView(context, this)
@@ -346,6 +370,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         taps.poll()?.let { placeFromTap(frame, camera, current, it[0], it[1]) }
         if (phase == ScanPhase.FIND_SURFACE && current.getAllTrackables(Plane::class.java).any { it.trackingState == TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING }) {
             phase = ScanPhase.PLACE_BOX
+            if (surfaceFoundAfterMs == null) surfaceFoundAfterMs = SystemClock.uptimeMillis() - startedAt
         }
         camera.pose.toMatrix(rawPose, 0)
         val now = SystemClock.uptimeMillis()
@@ -448,7 +473,10 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         this.distance = distance
         val inView = boxCentreInView(camera, pose, scanBox)
         boxInView = inView
-        if (anchorLost) return
+        if (anchorLost) {
+            framesSkippedForAnchor.incrementAndGet()
+            return
+        }
 
         if (now - lastDepthAt >= DEPTH_INTERVAL_MS && fusing.compareAndSet(false, true)) {
             val depth = acquireDepth(frame, camera, pose)
@@ -520,6 +548,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 if (depth.timestamp == lastRawDepthAt) return null
                 frame.acquireRawDepthConfidenceImage().use { confidence ->
                     lastRawDepthAt = depth.timestamp
+                    rawDepthMaps.incrementAndGet()
+                    depthSize = "${depth.width}×${depth.height}"
                     return DepthFrame(
                         depth.width, depth.height, CameraImages.copyDepth(depth),
                         intrinsicsOf(camera, texture = true).scaledTo(depth.width, depth.height), pose,
@@ -541,6 +571,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             return null
         }
         return try {
+            smoothedDepthMaps.incrementAndGet()
+            depthSize = "${image.width}×${image.height} (smoothed)"
             // Depth maps share the field of view of the camera texture (see ARCore's raw depth sample).
             DepthFrame(image.width, image.height, CameraImages.copyDepth(image), intrinsicsOf(camera, texture = true).scaledTo(image.width, image.height), pose)
         } finally {
@@ -744,6 +776,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             }
             .maxByOrNull { it.imageSize.width * it.imageSize.height }
         if (best != null) session.cameraConfig = best
+        val used = session.cameraConfig
+        cameraSize = "${used.imageSize.width}×${used.imageSize.height}"
     }
 
     private fun decode(photo: Keyframe): KeyframeImage? {

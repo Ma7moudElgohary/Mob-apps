@@ -88,8 +88,10 @@ data class UiState(
     val remote: RemoteUi = RemoteUi(),
     /** Why the app closed unexpectedly last time, until the user closes the note. */
     val crash: CrashReport? = null,
-    /** Features turned off because they crashed the app on this phone. */
+    /** Features turned off because they crashed the app, or are known to crash on this phone model. */
     val turnedOff: List<Fallback> = emptyList(),
+    /** Whether the Safe mode row can turn anything back on. */
+    val canTurnBackOn: Boolean = false,
     /** ML Kit can't tell objects apart on this phone: offer Segment Anything (its download size in bytes). */
     val segmentAnythingOffer: Long? = null,
 )
@@ -138,6 +140,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             depthBackend = services.depth.backendSummary,
             crash = diagnostics.report,
             turnedOff = diagnostics.turnedOff,
+            canTurnBackOn = diagnostics.canTurnBackOn,
             segmentAnythingOffer = segmentAnythingOffer(),
         ),
     )
@@ -933,10 +936,19 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(crash = null) }
     }
 
-    /** Turns back on the features a crash turned off. */
+    /** Turns back on the features a crash turned off; what is known to crash on this phone model stays off. */
     fun turnFeaturesBackOn() {
         diagnostics.turnAllBackOn()
-        _state.update { it.copy(turnedOff = emptyList(), message = "Every feature is back on.", isError = false) }
+        val stays = diagnostics.turnedOff
+        _state.update {
+            it.copy(
+                turnedOff = stays,
+                canTurnBackOn = diagnostics.canTurnBackOn,
+                segmentAnythingOffer = segmentAnythingOffer(),
+                message = if (stays.isEmpty()) "Every feature is back on." else "Turned back on what could be. ${stays.joinToString(" ") { it.label }}",
+                isError = false,
+            )
+        }
     }
 
     fun showMessage(message: String, isError: Boolean) {

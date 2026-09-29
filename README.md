@@ -13,10 +13,15 @@ GLB, STL, OBJ, PLY or a game-ready Unreal pack.
 
 1. Point the camera at the table until ARCore finds it, then tap the object. A box appears around it; set its
    size (15 cm to 1.2 m) and start.
-2. Walk around the object in three rings (at its height, from 45° above, from high above) and finish from straight
-   above. A **coach** gives one instruction at a time: tracking problems, "Too fast", "Too close" / "Come closer",
-   "Low detail here", which ring to do and "Move left/right" towards the nearest gap, "Top view missing", and
-   "Scan complete" at 85% coverage. A radar and dots around the object show what is covered.
+2. The scan is four steps, one big instruction at a time (find the object, tap it, pick its size from
+   "in a hand / shoebox / a chair", walk around it), and a how-to card the first time. **Two laps are enough**: at the
+   object's height, then a bit higher looking down at 45°. The phone says "That's enough, tap Build model" and offers a
+   third, high lap and a view from straight above only to clean up the top. A **coach** gives the advice, on the
+   screen and **out loud** (the phone's own voice; it can be turned off), and taps the phone for every new side
+   covered: tracking problems, "Too fast", "Too close" / "Come closer", "Low detail here", "Move left/right" towards
+   the nearest gap. Advice has to hold for a moment before it changes or is spoken, so it doesn't flicker. A radar
+   and dots around the object show what is covered. Leaving or starting over asks first once there is something to
+   lose.
 3. About four times a second ARCore's **raw depth** is fused into a truncated signed distance field over the box
    (3.5 mm voxels for small objects), each pixel weighted by ARCore's **confidence** (smoothed depth is the fallback
    until raw depth arrives). An ARCore **anchor** at the box follows ARCore's corrections to its map, so the volume
@@ -51,6 +56,11 @@ removed when it ends. If the app dies inside one, the next launch turns that fea
 (**Safe mode**, with a button to turn it back on) and shows a card saying what happened, with the crash's stack
 (from Android's exit records and the tombstone) to **Copy** or **Share**. The photo being worked on is kept and comes
 back after a crash. Photos taken with the app's camera are also saved to the Gallery, in `Pictures/Reality3D`.
+
+Phone models that reports show always crash in ML Kit (so far the Galaxy S26 Ultra, `SM-S948B`) skip it from the
+start, even on a fresh install or after **Turn on**. A scan has its own **Copy report** button (while scanning, when
+it fails and on the result): how long each step took, the warnings shown and for how long, the camera and depth
+ARCore gave (raw or smoothed depth maps), what the box anchor cost and how the build went.
 
 When ML Kit's cut-out is off, the app offers **Segment Anything 2.1** (Meta, Apache-2.0, tiny, through LiteRT on the
 GPU or CPU; 97 MB, downloaded once and checked with SHA-256). It finds the photo's objects with a grid of prompts,
