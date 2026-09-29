@@ -19,18 +19,21 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Native work that can take the whole app down; it is written down while it runs. */
 enum class Step(val label: String, val fallback: Fallback?) {
     FIND_OBJECTS("finding the objects in the photo (ML Kit)", Fallback.ONE_OBJECT),
-    SEPARATE_OBJECT("separating the object from the background (ML Kit)", Fallback.NO_SEGMENTATION),
     DEPTH_GPU("running the depth model on the GPU", Fallback.NO_DEPTH_GPU),
     DEPTH_NPU("running the depth model on the NPU", Fallback.NO_DEPTH_NPU),
     DEPTH_CPU("running the depth model on the CPU", null),
+    SAM_GPU("finding the objects with Segment Anything on the GPU", Fallback.NO_SAM_GPU),
+    SAM_CPU("finding the objects with Segment Anything on the CPU", Fallback.NO_SAM),
 }
 
 /** A feature turned off because it crashed the app on this phone. */
 enum class Fallback(val shortName: String, val label: String) {
-    ONE_OBJECT("picking objects", "Separate objects are no longer told apart; the photo's main object is used as a whole."),
-    NO_SEGMENTATION("automatic cut-out", "The object is no longer cut out automatically; paint it in with Edit outline."),
+    // Persisted under this name by earlier versions: it is ML Kit's cut-out that is off, in all its forms.
+    ONE_OBJECT("Google's cut-out", "Google's cut-out is off on this phone; Segment Anything or Edit outline cuts the object out instead."),
     NO_DEPTH_GPU("GPU depth", "The depth model no longer uses the GPU."),
     NO_DEPTH_NPU("NPU depth", "The depth model no longer uses the NPU."),
+    NO_SAM_GPU("GPU cut-out", "Segment Anything no longer uses the GPU."),
+    NO_SAM("Segment Anything", "Segment Anything is off; Google's simpler cut-out finds the main object."),
     ;
 
     internal val key get() = "off_$name"

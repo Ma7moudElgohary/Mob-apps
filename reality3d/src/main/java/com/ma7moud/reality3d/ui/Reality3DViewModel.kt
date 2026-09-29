@@ -13,7 +13,9 @@ import com.ma7moud.reality3d.Reality3DApplication
 import com.ma7moud.reality3d.ai.AiState
 import com.ma7moud.reality3d.ai.ObjectInsight
 import com.ma7moud.reality3d.ai.withInsight
+import com.ma7moud.reality3d.data.GalleryExport
 import com.ma7moud.reality3d.data.ImageLoader
+import com.ma7moud.reality3d.data.LastPhoto
 import com.ma7moud.reality3d.depth.DepthMap
 import com.ma7moud.reality3d.diagnostics.CrashReport
 import com.ma7moud.reality3d.diagnostics.Fallback
@@ -48,6 +50,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -87,6 +90,8 @@ data class UiState(
     val crash: CrashReport? = null,
     /** Features turned off because they crashed the app on this phone. */
     val turnedOff: List<Fallback> = emptyList(),
+    /** ML Kit can't tell objects apart on this phone: offer Segment Anything (its download size in bytes). */
+    val segmentAnythingOffer: Long? = null,
 )
 
 /** A full 3D model made by an image-to-3D AI on the user's computer. */
@@ -116,6 +121,8 @@ data class SubjectsView(
     val overlay: Bitmap,
     /** The outline was changed by hand. */
     val edited: Boolean,
+    /** A tap on something not yet found looks for an object there. */
+    val canPick: Boolean = false,
 )
 
 class Reality3DViewModel(application: Application) : AndroidViewModel(application) {
@@ -131,6 +138,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             depthBackend = services.depth.backendSummary,
             crash = diagnostics.report,
             turnedOff = diagnostics.turnedOff,
+            segmentAnythingOffer = segmentAnythingOffer(),
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -141,7 +149,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     /** The photo's objects: what the segmenter found, the chosen ones and any outline painted by hand. */
     private class PhotoSubjects(
         val photo: Bitmap,
-        val segmentation: Segmentation?,
+        var segmentation: Segmentation?,
         val editWidth: Int,
         val editHeight: Int,
         /** The photo's brightness at editing resolution, for snapping outlines to its edges. */
@@ -151,7 +159,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         val analysisWidth: Int,
         val analysisHeight: Int,
     ) {
-        var selection: Set<Int> = emptySet()
+        var selection: Set<Int> = segmentation?.suggested.orEmpty()
 
         /** Strokes and settings from the editor; its base is set from [selection] whenever it is used. */
         var edit: MaskEdit? = null
@@ -170,6 +178,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     private var lastMask: SubjectMask? = null
     private var inputs: Inputs? = null
     private val remoteSettings = RemoteSettingsStore(application)
+    private val lastPhoto = LastPhoto(File(application.filesDir, "last_photo"))
     private var remoteJob: Job? = null
     private var pipeline: Job? = null
     private var rebuild: Job? = null
@@ -180,6 +189,52 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         val settings = remoteSettings.load()
         _state.update { it.copy(remote = it.remote.copy(settings = settings)) }
         if (settings.url.isNotBlank()) checkServer()
+        restoreLastPhoto()
+    }
+
+    /**
+     * After the app closed unexpectedly, brings back the photo it was working on, so the user doesn't have to find
+     * it again. Nothing is analysed until they ask: the photo may be what brought the app down. After a normal
+     * exit the kept photo is dropped.
+     */
+    private fun restoreLastPhoto() {
+        if (diagnostics.report == null) {
+            viewModelScope.launch(Dispatchers.IO) { lastPhoto.clear() }
+            return
+        }
+        pipeline = viewModelScope.launch {
+            val photo = withContext(Dispatchers.IO) { lastPhoto.load() } ?: return@launch
+            if (_state.value.photo != null) return@launch
+            showPhoto(photo)
+            _state.update { it.copy(message = "Your last photo is back. Tap Make 3D model, or Edit outline to cut the object out yourself.", isError = false) }
+        }
+    }
+
+    /** Keeps [photo] on disk from the moment it opens, before anything that could crash the app runs on it. */
+    private suspend fun rememberPhoto(photo: Bitmap) {
+        withContext(Dispatchers.IO) {
+            try {
+                lastPhoto.save(photo)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't keep the photo", e)
+            }
+        }
+    }
+
+    /** Also saves a photo taken with the app's camera in the phone's Gallery, where photos are looked for. */
+    fun keepInGallery(uri: Uri) {
+        if (!GalleryExport.available) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { GalleryExport.save(getApplication(), uri) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't save the photo to the Gallery", e)
+            }
+        }
     }
 
     fun onResume() {
@@ -206,6 +261,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
                 return@launch
             }
             showPhoto(photo)
+            rememberPhoto(photo)
             findSubjects(photo)
         }
     }
@@ -215,6 +271,7 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         rebuild?.cancel()
         pipeline = viewModelScope.launch {
             showPhoto(photo)
+            rememberPhoto(photo)
             findSubjects(photo)
         }
     }
@@ -246,12 +303,12 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "Subject segmentation failed", e)
-            _state.update { it.copy(progress = null) }
+            _state.update { it.copy(progress = null, message = "Couldn't cut the object out (${e.readable()}). Tap it, or use Edit outline.", isError = true) }
             return null
         } catch (e: LinkageError) {
             // Google Play services' ML Kit didn't match the app; carry on without separating the object.
             Log.w(TAG, "Subject segmentation couldn't start", e)
-            _state.update { it.copy(progress = null) }
+            _state.update { it.copy(progress = null, message = "Couldn't cut the object out (${e.javaClass.simpleName}). Use Edit outline.", isError = true) }
             return null
         }
         // Showing the objects is a help, not a must: if it fails, the photo stays and the model can still be made.
@@ -312,7 +369,8 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
         }
         lastMask = mask
         if (subjects !== found) return
-        _state.update { it.copy(subjects = SubjectsView(found.count, selection, overlay, found.edit != null), photoQuality = quality) }
+        val view = SubjectsView(found.count, selection, overlay, found.edit != null, canPick = services.segmenter.canPick)
+        _state.update { it.copy(subjects = view, photoQuality = quality) }
     }
 
     /** Rates the photo again, for example once Gemini Nano has said the object is shiny. */
@@ -439,8 +497,13 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun tapSubject(u: Float, v: Float) {
         val found = subjects ?: return
-        if (found.count < 2 || pipeline?.isActive == true) return
-        val index = found.segmentation?.subjectAt(u, v) ?: return
+        if (pipeline?.isActive == true) return
+        val index = found.segmentation?.subjectAt(u, v)
+        if (index == null) {
+            if (services.segmenter.canPick) pickObject(found, u, v)
+            return
+        }
+        if (found.count < 2) return
         val current = found.selection
         var next = when {
             current.isEmpty() -> setOf(index)
@@ -461,25 +524,51 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** The mask changed: redraw it over the photo, and remake the model if there is one. */
     private fun subjectsChanged(found: PhotoSubjects) {
-        val photo = found.photo
-        val remake = _state.value.mesh != null
         pipeline?.cancel()
         rebuild?.cancel()
+        pipeline = viewModelScope.launch { showChangedSubjects(found) }
+    }
+
+    private suspend fun showChangedSubjects(found: PhotoSubjects) {
         // A different outline changes what one model unit is.
         _state.update { it.copy(metersPerUnit = null) }
+        try {
+            publishSubjects(found)
+            if (_state.value.mesh != null) {
+                ensureDepthModel()
+                makeModel(found.photo, found)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Remaking the model failed", e)
+            fail("Couldn't remake the model: ${e.readable()}.")
+        }
+    }
+
+    /** Looks for an object where the user tapped and adds it to the chosen ones. */
+    private fun pickObject(found: PhotoSubjects, u: Float, v: Float) {
+        rebuild?.cancel()
         pipeline = viewModelScope.launch {
-            try {
-                publishSubjects(found)
-                if (remake) {
-                    ensureDepthModel()
-                    makeModel(photo, found)
-                }
+            report("Looking at what you tapped…", null)
+            val subject = try {
+                services.segmenter.objectAt(found.photo, u, v)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "Remaking the model failed", e)
-                fail("Couldn't remake the model: ${e.readable()}.")
+                Log.w(TAG, "Couldn't find the tapped object", e)
+                null
             }
+            if (subjects !== found) return@launch
+            if (subject == null) {
+                _state.update { it.copy(progress = null, message = "Nothing to cut out there. Tap on the object itself.", isError = false) }
+                return@launch
+            }
+            found.segmentation = (found.segmentation ?: Segmentation(found.photo.width, found.photo.height, null, emptyList())) + subject
+            // Everything is chosen when nothing is picked; otherwise the new object joins the picked ones.
+            if (found.selection.isNotEmpty()) found.selection = found.selection + (found.count - 1)
+            _state.update { it.copy(progress = null) }
+            showChangedSubjects(found)
         }
     }
 
@@ -572,6 +661,35 @@ class Reality3DViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun downloadAi() = services.ai.download()
+
+    private fun segmentAnythingOffer(): Long? {
+        val model = services.segmentAnything
+        val wanted = diagnostics.isOff(Fallback.ONE_OBJECT) && !diagnostics.isOff(Fallback.NO_SAM)
+        return if (wanted && !model.isReady) model.downloadBytes else null
+    }
+
+    /** Fetches Segment Anything, then looks at the current photo with it. */
+    fun getSegmentAnything() {
+        if (pipeline?.isActive == true) return
+        val model = services.segmentAnything
+        pipeline = viewModelScope.launch {
+            val label = "Downloading Segment Anything (${formatBytes(model.downloadBytes)}, only once)…"
+            try {
+                report(label, 0f)
+                model.download { report(label, it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Segment Anything download failed", e)
+                fail("Couldn't download Segment Anything: ${e.readable()}.")
+                return@launch
+            }
+            _state.update { it.copy(segmentAnythingOffer = segmentAnythingOffer(), progress = null) }
+            val photo = _state.value.photo ?: return@launch
+            subjects = null
+            findSubjects(photo)
+        }
+    }
 
     fun retryAi() = services.ai.refresh()
 

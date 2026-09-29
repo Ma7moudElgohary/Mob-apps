@@ -82,6 +82,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ma7moud.reality3d.ai.AiState
+import com.ma7moud.reality3d.data.GalleryExport
 import com.ma7moud.reality3d.diagnostics.Fallback
 import com.ma7moud.reality3d.ai.CaptureMode
 import com.ma7moud.reality3d.ai.ObjectInsight
@@ -208,7 +209,10 @@ private fun Reality3DScreen(
     }
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         val uri = cameraUri
-        if (saved && uri != null) viewModel.loadPhoto(uri)
+        if (saved && uri != null) {
+            viewModel.loadPhoto(uri)
+            viewModel.keepInGallery(uri)
+        }
     }
 
     fun launchCamera() {
@@ -335,6 +339,7 @@ private fun Reality3DScreen(
             onUseAll = viewModel::useAllSubjects,
             onEditOutline = viewModel::openEditor,
         )
+        state.segmentAnythingOffer?.let { bytes -> SegmentAnythingCard(bytes, enabled = !busy, onGet = viewModel::getSegmentAnything) }
         state.photoQuality?.let {
             QualityCard("Photo quality", it, goodText = "Sharp, well lit and cleanly separated: this photo should work well.")
         }
@@ -562,7 +567,8 @@ private fun PhotoCard(
                     Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("One object, plain background", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Keep the whole object in the frame and fill most of it. Soft, even light works best.",
+                            "Keep the whole object in the frame and fill most of it. Soft, even light works best." +
+                                if (GalleryExport.available) " Photos taken here are also saved in your Gallery, in ${GalleryExport.FOLDER}." else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
@@ -570,7 +576,8 @@ private fun PhotoCard(
                     }
                 }
             } else {
-                SubjectPicker(photo, subjects?.overlay, tappable = enabled && (subjects?.count ?: 0) > 1, onTap = onTapSubject)
+                val tappable = enabled && subjects != null && (subjects.count > 1 || subjects.canPick)
+                SubjectPicker(photo, subjects?.overlay, tappable = tappable, onTap = onTapSubject)
                 if (subjects != null) SubjectSummary(subjects, enabled, onUseAll, onEditOutline)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -617,7 +624,9 @@ private fun SubjectPicker(photo: Bitmap, overlay: Bitmap?, tappable: Boolean, on
 private fun SubjectSummary(subjects: SubjectsView, enabled: Boolean, onUseAll: () -> Unit, onEditOutline: () -> Unit) {
     val text = when {
         subjects.edited -> "Using your edited outline; the dimmed part is left out."
+        subjects.count == 0 && subjects.canPick -> "Nothing stood out by itself. Tap the object to cut it out, or paint it in with Edit outline."
         subjects.count == 0 -> "Nothing stood out from the background, so the whole photo is used. Paint the object in with Edit outline."
+        subjects.count == 1 && subjects.canPick -> "Object found; the dimmed part is left out. Tap anything else to add it."
         subjects.count == 1 -> "Object found; the dimmed part is left out."
         subjects.selection.isEmpty() -> "${subjects.count} objects found. Tap one to model only it."
         else -> "${subjects.selection.size} of ${subjects.count} objects chosen. Tap to add or remove."
@@ -626,6 +635,25 @@ private fun SubjectSummary(subjects: SubjectsView, enabled: Boolean, onUseAll: (
         Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
         if (subjects.selection.isNotEmpty()) TextButton(onClick = onUseAll, enabled = enabled) { Text("Use all") }
         FilledTonalButton(onClick = onEditOutline, enabled = enabled) { Text("Edit outline") }
+    }
+}
+
+/** On phones where ML Kit can't tell objects apart, offers Segment Anything instead. */
+@Composable
+private fun SegmentAnythingCard(bytes: Long, enabled: Boolean, onGet: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Pick objects with Segment Anything", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Google's object finder crashed on this phone, so only the photo's main object is cut out. Segment " +
+                    "Anything finds every object and cuts out whatever you tap, on the phone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(onClick = onGet, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text("Get Segment Anything (${Reality3DViewModel.formatBytes(bytes)}, once)")
+            }
+        }
     }
 }
 

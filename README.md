@@ -43,6 +43,19 @@ GLB, STL, OBJ, PLY or a game-ready Unreal pack.
    [`reality3d-server`](reality3d-server/) on a computer with a GPU (Stable Fast 3D, TripoSR or Hunyuan3D-2),
    which returns a complete textured model. Plain http is only used for addresses on the local network.
 
+### When something crashes the app
+
+Some of the work runs in native code inside the app (ML Kit's cut-out, the depth model on the GPU or NPU), where
+no `try`/`catch` helps if a phone's driver misbehaves. Each such step is written to disk before it starts and
+removed when it ends. If the app dies inside one, the next launch turns that feature off on that phone
+(**Safe mode**, with a button to turn it back on) and shows a card saying what happened, with the crash's stack
+(from Android's exit records and the tombstone) to **Copy** or **Share**. The photo being worked on is kept and comes
+back after a crash. Photos taken with the app's camera are also saved to the Gallery, in `Pictures/Reality3D`.
+
+When ML Kit's cut-out is off, the app offers **Segment Anything 2.1** (Meta, Apache-2.0, tiny, through LiteRT on the
+GPU or CPU; 97 MB, downloaded once and checked with SHA-256). It finds the photo's objects with a grid of prompts,
+starts from the one in the middle, and a tap on anything else cuts that out too.
+
 ### Viewer, measuring and AR
 
 - Looks: photo or scan colours, clay, wireframe, normals, depth; front/back/left/right/top views, auto-rotate,
@@ -63,11 +76,12 @@ and import notes) and, for scans, **Photos** (the scan photos with camera poses 
 
 ### Tests
 
-115 JVM tests cover the mesh builder and simplifier, depth input and refinement, exporters and the GLB reader,
-segmentation and the mask editor, the viewer's picking and framing, the Gemini Nano parser, scan fusion (synthetic
-scans must fuse into a closed surface within about 1 mm, also from sparse raw depth with outliers), the scan coach
-and quality, photo quality, saved projects, the server client, and Robolectric runs of every screen with fake
-engines. The server has its own pytest suite; CI runs both.
+JVM tests cover the mesh builder and simplifier, depth input and refinement, exporters and the GLB reader,
+segmentation, the mask editor and Segment Anything's prompt and mask handling, the viewer's picking and framing, the
+Gemini Nano parser, scan fusion (synthetic scans must fuse into a closed surface within about 1 mm, also from sparse
+raw depth with outliers), the scan coach and quality, photo quality, saved projects, the server client, crash
+diagnostics (tombstones, freezes, turning features off) and Robolectric runs of every screen with fake engines,
+including a real camera JPEG. The server has its own pytest suite; CI runs both.
 
 ## Neon Drift
 

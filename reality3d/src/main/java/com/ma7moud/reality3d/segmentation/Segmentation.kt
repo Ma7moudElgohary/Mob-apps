@@ -21,8 +21,20 @@ class Subject(val left: Int, val top: Int, val width: Int, val height: Int, val 
     val area: Int by lazy { confidence.count { it >= 0.5f } }
 }
 
-/** What the segmenter found in a photo: the combined foreground and every object on its own. */
-class Segmentation(val photoWidth: Int, val photoHeight: Int, val foreground: SubjectMask?, val subjects: List<Subject>) {
+/**
+ * What the segmenter found in a photo: the combined foreground (null to combine the objects) and every object on
+ * its own, with the objects to start from when that isn't all of them.
+ */
+class Segmentation(
+    val photoWidth: Int,
+    val photoHeight: Int,
+    val foreground: SubjectMask?,
+    val subjects: List<Subject>,
+    val suggested: Set<Int> = emptySet(),
+) {
+
+    /** With one more object, found where the user tapped; the foreground becomes all the objects together. */
+    operator fun plus(subject: Subject) = Segmentation(photoWidth, photoHeight, null, subjects + subject, suggested)
 
     /**
      * The mask of the [selected] objects (indices into [subjects]). An empty selection, or all of them,

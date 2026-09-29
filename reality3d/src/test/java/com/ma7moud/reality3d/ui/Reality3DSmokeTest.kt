@@ -55,6 +55,8 @@ import com.ma7moud.reality3d.preview.ArPreviewFactory
 import com.ma7moud.reality3d.preview.ArPreviewStatus
 import com.ma7moud.reality3d.preview.PreviewModel
 import com.ma7moud.reality3d.scan.ScanSupport
+import com.ma7moud.reality3d.segmentation.CutOut
+import com.ma7moud.reality3d.segmentation.SegmentAnythingModel
 import com.ma7moud.reality3d.segmentation.Segmentation
 import com.ma7moud.reality3d.segmentation.Subject
 import com.ma7moud.reality3d.segmentation.SubjectMask
@@ -81,7 +83,34 @@ import kotlin.math.hypot
 
 /** Fake engines: a dome of depth, a round subject, a canned Gemini Nano answer and a made-up scan. */
 class TestReality3DApplication : Reality3DApplication() {
-    override fun createServices() = Services(FakeDepth(), FakeSegmenter(), FakeAi(), FakeScanner, projectStore(), FakeArPreview, FakeRemote, useGlViewer = false)
+    override fun createServices(): Services {
+        val sam = FakeSegmentAnything()
+        return Services(
+            FakeDepth(), CutOut(FakeSegmenter(), FakeSam(), sam, diagnostics), FakeAi(), FakeScanner, projectStore(), FakeArPreview,
+            FakeRemote, sam, useGlViewer = false,
+        )
+    }
+}
+
+/** Segment Anything's files: missing until downloaded. */
+internal class FakeSegmentAnything : SegmentAnythingModel {
+    override var isReady = false
+    override val downloadBytes = 97_249_760L
+    override suspend fun download(onProgress: (Float) -> Unit) {
+        onProgress(0.5f)
+        isReady = true
+    }
+}
+
+/** Stands in for Segment Anything: finds one round object on the left, and a round object wherever the user taps. */
+private class FakeSam : SubjectSegmenterEngine {
+    override val canPick = true
+
+    override suspend fun segment(photo: Bitmap, onProgress: (String, Float?) -> Unit) =
+        Segmentation(photo.width, photo.height, null, listOf(disc(photo.width * 0.3f, photo.height * 0.5f, photo.height * 0.2f, photo.width, photo.height)))
+
+    override suspend fun objectAt(photo: Bitmap, u: Float, v: Float) =
+        disc(u * photo.width, v * photo.height, photo.height * 0.15f, photo.width, photo.height)
 }
 
 /**
@@ -114,16 +143,17 @@ private class FakeSegmenter : SubjectSegmenterEngine {
         val foreground = SubjectMask(w, h, FloatArray(w * h) { i -> maxOf(big.at(i % w, i / w), small.at(i % w, i / w)) })
         return Segmentation(w, h, foreground, listOf(big, small))
     }
+}
 
-    private fun disc(cx: Float, cy: Float, r: Float, w: Int, h: Int): Subject {
-        val left = (cx - r).toInt().coerceAtLeast(0)
-        val top = (cy - r).toInt().coerceAtLeast(0)
-        val width = minOf(w - left, (2 * r).toInt() + 2)
-        val height = minOf(h - top, (2 * r).toInt() + 2)
-        return Subject(left, top, width, height, FloatArray(width * height) { i ->
-            if (hypot(left + i % width - cx, top + i / width - cy) < r) 1f else 0f
-        })
-    }
+/** A round object of radius [r] around ([cx], [cy]) on a [w] × [h] photo. */
+private fun disc(cx: Float, cy: Float, r: Float, w: Int, h: Int): Subject {
+    val left = (cx - r).toInt().coerceAtLeast(0)
+    val top = (cy - r).toInt().coerceAtLeast(0)
+    val width = minOf(w - left, (2 * r).toInt() + 2)
+    val height = minOf(h - top, (2 * r).toInt() + 2)
+    return Subject(left, top, width, height, FloatArray(width * height) { i ->
+        if (hypot(left + i % width - cx, top + i / width - cy) < r) 1f else 0f
+    })
 }
 
 /** Stands in for ARCore's AR view: always available, placed as soon as it resumes. */

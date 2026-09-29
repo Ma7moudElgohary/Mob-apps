@@ -40,7 +40,7 @@ class DiagnosticsTest {
         assertTrue(report.summary.endsWith(Fallback.ONE_OBJECT.label + " Try again."))
         assertEquals(listOf(Fallback.ONE_OBJECT), report.turnedOff)
         assertTrue(diagnostics.isOff(Fallback.ONE_OBJECT))
-        assertFalse(diagnostics.isOff(Fallback.NO_SEGMENTATION))
+        assertFalse(diagnostics.isOff(Fallback.NO_SAM))
 
         // The next launch has nothing new to say, and the feature stays off until turned back on.
         val next = Diagnostics(context) { records }
@@ -83,10 +83,10 @@ class DiagnosticsTest {
 
     @Test
     fun withoutExitRecordsALeftoverStepCountsAsACrash() {
-        diedDuring(Step.SEPARATE_OBJECT)
+        diedDuring(Step.SAM_CPU)
         val report = Diagnostics(context) { null }.report!!
-        assertEquals(listOf(Fallback.NO_SEGMENTATION), report.turnedOff)
-        assertTrue(report.summary, report.summary.startsWith("It closed while it was busy. It was separating the object"))
+        assertEquals(listOf(Fallback.NO_SAM), report.turnedOff)
+        assertTrue(report.summary, report.summary.startsWith("It closed while it was busy. It was finding the objects with Segment Anything on the CPU"))
     }
 
     @Test
