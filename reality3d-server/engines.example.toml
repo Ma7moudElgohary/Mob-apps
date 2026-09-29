@@ -1,6 +1,8 @@
 # Copy to engines.toml (next to server.py) and point each engine at your install.
 # {input} is the phone's cut-out (PNG with a transparent background), {output} a folder for the result;
 # the newest .glb written there is sent back. {texture_size} and {faces} come from the app.
+# Use forward slashes in paths (C:/tools/...), quote a path that has spaces, and put the command in single quotes
+# when it has double quotes inside. Add cwd = "..." when the tool must run from its own folder.
 
 [sf3d]
 # https://github.com/Stability-AI/stable-fast-3d

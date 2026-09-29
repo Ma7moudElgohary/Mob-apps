@@ -5,7 +5,6 @@ import io
 import os
 import shlex
 import subprocess
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -14,6 +13,11 @@ import numpy as np
 from PIL import Image
 
 from glb import write_glb
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 Progress = Callable[[Optional[float], str], None]
 
@@ -100,14 +104,24 @@ class PreviewEngine(Engine):
         return out
 
 
+def split_command(template: str, windows: bool = os.name == "nt") -> list:
+    """Splits a command line into its arguments. On Windows a backslash is a path separator, not an escape."""
+    if not windows:
+        return shlex.split(template)
+    parts = shlex.split(template, posix=False)
+    return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p for p in parts]
+
+
 class CommandEngine(Engine):
     """Runs an installed image-to-3D project through a command line from the config, e.g. Stable Fast 3D's run.py,
-    then picks up the GLB it wrote. Placeholders: {input} {output} {texture_size} {faces}."""
+    then picks up the GLB it wrote. Placeholders: {input} {output} {texture_size} {faces}. The command runs in
+    `cwd` when the config gives one (many projects want to run from their own folder), else in the job's folder."""
 
-    def __init__(self, id: str, name: str, note: str, command: Optional[str], timeout: int = 1800):
+    def __init__(self, id: str, name: str, note: str, command: Optional[str], timeout: int = 1800, cwd: Optional[str] = None):
         super().__init__(id, name, note)
         self.command = command
         self.timeout = timeout
+        self.cwd = cwd
 
     def available(self) -> bool:
         return bool(self.command)
@@ -119,10 +133,11 @@ class CommandEngine(Engine):
         output.mkdir(exist_ok=True)
         values = {"input": str(image), "output": str(output), "texture_size": str(options.get("texture_size", 1024)),
                   "faces": str(options.get("faces", 20000))}
-        args = shlex.split(self.command.format(**values))
+        # Split first and fill in afterwards, so paths with spaces (C:\\Users\\Ana Maria\\...) stay one argument.
+        args = [part.format(**values) for part in split_command(self.command)]
         progress(None, f"Running {self.name}")
         try:
-            done = subprocess.run(args, capture_output=True, text=True, timeout=self.timeout, cwd=work)
+            done = subprocess.run(args, capture_output=True, text=True, timeout=self.timeout, cwd=self.cwd or work)
         except FileNotFoundError as e:
             raise EngineError(f"couldn't start {self.name}: {e}") from e
         except subprocess.TimeoutExpired as e:
@@ -183,15 +198,15 @@ def load_engines(config_path: Optional[Path] = None) -> dict:
     engines = [
         PreviewEngine(),
         CommandEngine("sf3d", "Stable Fast 3D", "Fast (about a second on a big GPU), textured, needs about 6 GB of GPU memory.",
-                      sf3d.get("command"), int(sf3d.get("timeout", 1800))),
+                      sf3d.get("command"), int(sf3d.get("timeout", 1800)), sf3d.get("cwd")),
         CommandEngine("triposr", "TripoSR", "Fast and light, works on smaller GPUs.",
-                      triposr.get("command"), int(triposr.get("timeout", 1800))),
+                      triposr.get("command"), int(triposr.get("timeout", 1800)), triposr.get("cwd")),
         HunyuanEngine(hunyuan.get("model", "tencent/Hunyuan3D-2"), bool(hunyuan.get("texture", True))),
     ]
     for id, section in config.items():
         if id not in ("sf3d", "triposr", "hunyuan3d") and isinstance(section, dict) and section.get("command"):
             engines.append(CommandEngine(id, section.get("name", id), section.get("note", ""), section["command"],
-                                         int(section.get("timeout", 1800))))
+                                         int(section.get("timeout", 1800)), section.get("cwd")))
     return {e.id: e for e in engines}
 
 

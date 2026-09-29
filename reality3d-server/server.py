@@ -1,6 +1,6 @@
 """Reality3D server: turns a phone's cut-out photo into a full 3D model with an image-to-3D AI on this computer's GPU.
 
-Run:  uvicorn server:app --host 0.0.0.0 --port 8765
+Run:  python run.py   (it shows the address to type in the app; or: uvicorn server:app --host 0.0.0.0 --port 8765)
 """
 
 import io
@@ -27,6 +27,11 @@ MAX_UPLOAD = 20 * 1024 * 1024
 MAX_SIDE = 2048
 KEEP_SECONDS = 3600
 MAX_JOBS = 50
+
+
+def log(message: str) -> None:
+    """A line on the console, so the person at the computer can see the phone's jobs arrive."""
+    print(f"{time.strftime('%H:%M:%S')}  {message}", flush=True)
 
 
 @dataclass
@@ -74,6 +79,8 @@ class Worker:
                 continue
             job.status = "running"
             engine = self.engines[job.engine]
+            started = time.time()
+            log(f"{engine.name}: started")
 
             def progress(fraction: Optional[float], message: str):
                 job.progress = fraction
@@ -82,10 +89,13 @@ class Worker:
             try:
                 job.result = engine.run(job.folder / "input.png", job.folder, job.options, progress)
                 job.status, job.progress, job.message = "done", 1.0, None
+                log(f"{engine.name}: done in {time.time() - started:.0f} s")
             except EngineError as e:
                 job.status, job.message = "failed", str(e)
+                log(f"{engine.name}: failed: {e}")
             except Exception as e:  # An engine's own error: report it rather than dying.
                 job.status, job.message = "failed", f"{engine.name} failed: {e.__class__.__name__}: {e}"
+                log(f"{engine.name}: failed: {e.__class__.__name__}: {e}")
 
     def _forget_old(self):
         now = time.time()
