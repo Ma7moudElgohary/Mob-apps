@@ -2,6 +2,8 @@ package com.ma7moud.reality3d.scan
 
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -290,13 +292,20 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
 internal object FusionFrameGate {
     private const val IMAGE_MARGIN = 0.05f
     private const val MIN_VALID_SAMPLES = 4
+    private const val MIN_VALID_FRACTION = 0.02f
     private const val SAMPLE_GRID = 20
     private const val MIN_RAW_CONFIDENCE = 38 // ~15%, matching TsdfVolume's per-pixel confidence floor.
+
+    private data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+        val width: Int get() = right - left
+        val height: Int get() = bottom - top
+    }
 
     fun accept(frame: DepthFrame, box: ScanBox): Boolean {
         if (!sensibleDistance(frame.pose, box)) return false
         if (!aimedAtBox(frame, box)) return false
-        return hasUsableDepth(frame)
+        val region = projectedBoxRegion(frame, box) ?: return false
+        return hasUsableDepth(frame, region)
     }
 
     private fun sensibleDistance(pose: CameraPose, box: ScanBox): Boolean {
@@ -318,27 +327,55 @@ internal object FusionFrameGate {
             projected[1] in marginY..(frame.height - marginY)
     }
 
-    private fun hasUsableDepth(frame: DepthFrame): Boolean {
-        val stepX = max(1, frame.width / SAMPLE_GRID)
-        val stepY = max(1, frame.height / SAMPLE_GRID)
+    /** Bounding rectangle of the selected 3D box in this depth image, clipped to the image. */
+    private fun projectedBoxRegion(frame: DepthFrame, box: ScanBox): Region? {
+        val projected = FloatArray(3)
+        var left = Float.POSITIVE_INFINITY
+        var top = Float.POSITIVE_INFINITY
+        var right = Float.NEGATIVE_INFINITY
+        var bottom = Float.NEGATIVE_INFINITY
+        for (corner in 0 until 8) {
+            val x = if (corner and 1 == 0) box.minX else box.minX + box.size
+            val y = if (corner and 2 == 0) box.bottomY else box.bottomY + box.size
+            val z = if (corner and 4 == 0) box.minZ else box.minZ + box.size
+            if (!frame.pose.project(x, y, z, frame.intrinsics, projected)) return null
+            left = min(left, projected[0])
+            top = min(top, projected[1])
+            right = max(right, projected[0])
+            bottom = max(bottom, projected[1])
+        }
+        val x0 = floor(left.toDouble()).toInt().coerceIn(0, frame.width)
+        val y0 = floor(top.toDouble()).toInt().coerceIn(0, frame.height)
+        val x1 = ceil(right.toDouble()).toInt().coerceIn(0, frame.width)
+        val y1 = ceil(bottom.toDouble()).toInt().coerceIn(0, frame.height)
+        return if (x1 > x0 && y1 > y0) Region(x0, y0, x1, y1) else null
+    }
+
+    /**
+     * Raw depth may be sparse, so only a small fraction is required. The important part is that those
+     * samples are inside the selected object's projected box instead of anywhere in the background.
+     */
+    private fun hasUsableDepth(frame: DepthFrame, region: Region): Boolean {
+        val stepX = max(1, region.width / SAMPLE_GRID)
+        val stepY = max(1, region.height / SAMPLE_GRID)
         var good = 0
-        var y = stepY / 2
-        while (y < frame.height) {
-            var x = stepX / 2
-            while (x < frame.width) {
+        var sampled = 0
+        var y = region.top + stepY / 2
+        while (y < region.bottom) {
+            var x = region.left + stepX / 2
+            while (x < region.right) {
+                sampled++
                 val index = y * frame.width + x
                 val depth = frame.depthMm[index].toInt() and 0xFFFF
                 if (depth in 1..4_000) {
                     val confidence = frame.confidence
-                    if (confidence == null || (confidence[index].toInt() and 0xFF) >= MIN_RAW_CONFIDENCE) {
-                        good++
-                        if (good >= MIN_VALID_SAMPLES) return true
-                    }
+                    if (confidence == null || (confidence[index].toInt() and 0xFF) >= MIN_RAW_CONFIDENCE) good++
                 }
                 x += stepX
             }
             y += stepY
         }
-        return false
+        if (sampled == 0 || good < MIN_VALID_SAMPLES) return false
+        return good.toFloat() / sampled >= MIN_VALID_FRACTION
     }
 }
