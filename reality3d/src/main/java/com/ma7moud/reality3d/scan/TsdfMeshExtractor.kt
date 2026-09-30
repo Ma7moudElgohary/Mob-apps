@@ -145,8 +145,8 @@ object TsdfMeshExtractor {
 
         val vertexCount = positions.size / 3
         val mesh = DepthMesh(
-            vertices = positions.toFloatArray(),
-            uvs = FloatArray(vertexCount * 2),
+            positions = positions.toFloatArray(),
+            texCoords = FloatArray(vertexCount * 2),
             indices = indices.toIntArray(),
             colors = colors.toFloatArray(),
             unitsToMeters = 1f,
