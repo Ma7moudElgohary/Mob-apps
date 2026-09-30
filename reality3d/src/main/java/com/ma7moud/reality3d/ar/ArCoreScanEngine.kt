@@ -554,14 +554,16 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                     image.close()
                 }
                 val intrinsics = intrinsicsOf(camera, texture = false).scaledTo(nv21.width, nv21.height)
-                synchronized(scanLock) {
-                    selector.add(toCamera)
-                    coverage.markPhoto(cell)
-                }
                 encoding.set(true)
                 encoder.execute {
                     try {
-                        keyframes += Keyframe(nv21.toJpeg(JPEG_QUALITY), nv21.width, nv21.height, intrinsics, pose)
+                        val jpeg = nv21.toJpeg(JPEG_QUALITY)
+                        keyframes += Keyframe(jpeg, nv21.width, nv21.height, intrinsics, pose)
+                        // Only commit photo evidence after a real keyframe has been encoded and stored.
+                        synchronized(scanLock) {
+                            selector.add(toCamera)
+                            coverage.markPhoto(cell)
+                        }
                     } catch (e: Exception) {
                         Log.w(TAG, "Couldn't encode a scan photo", e)
                     } finally {
