@@ -118,9 +118,6 @@ internal object RawDepthIntegrator {
                     ) / 255f
                     if (confidence < 0.50f) continue
 
-                    confidenceSum += confidence
-                    confidenceCount++
-
                     val depthMeters = depthMm / 1000f
                     val local = floatArrayOf(
                         (x - cx) / fx * depthMeters,
@@ -130,6 +127,11 @@ internal object RawDepthIntegrator {
                     val worldArray = pose.transformPoint(local)
                     val world = Vector3(worldArray[0], worldArray[1], worldArray[2])
                     if (target != null && (world - target).length() > maxRadiusMeters) continue
+
+                    // Quality must describe samples that actually belong to the scan target, not
+                    // high-confidence background pixels rejected by the radius gate.
+                    confidenceSum += confidence
+                    confidenceCount++
 
                     val color = if (cameraImage != null && imageRegion != null) {
                         sampleRegisteredYuvRgb(
