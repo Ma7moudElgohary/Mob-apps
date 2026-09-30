@@ -383,7 +383,11 @@ internal object FusionFrameGate {
         return good.toFloat() / sampled >= MIN_VALID_FRACTION
     }
 
-    /** Back-project one optical-axis depth sample into the ARCore world and compare it with the scan box. */
+    /**
+     * Back-project one optical-axis depth sample into the ARCore world and decide whether it is evidence
+     * of the selected subject. Points must lie near the scan box, but support-table points are deliberately
+     * excluded: table rays may still carve free space in [TsdfVolume], they just cannot prove the object was seen.
+     */
     internal fun depthPointNearBox(frame: DepthFrame, x: Int, y: Int, depthMm: Int, box: ScanBox): Boolean {
         val depth = depthMm * 0.001f
         val k = frame.intrinsics
@@ -394,8 +398,11 @@ internal object FusionFrameGate {
         val worldY = m[13] + m[1] * cameraX + m[5] * cameraY - m[9] * depth
         val worldZ = m[14] + m[2] * cameraX + m[6] * cameraY - m[10] * depth
         val tolerance = max(MIN_BOX_TOLERANCE, box.size * BOX_TOLERANCE_RATIO)
-        return worldX in (box.minX - tolerance)..(box.minX + box.size + tolerance) &&
-            worldY in (box.bottomY - tolerance)..(box.bottomY + box.size + tolerance) &&
-            worldZ in (box.minZ - tolerance)..(box.minZ + box.size + tolerance)
+        if (worldX !in (box.minX - tolerance)..(box.minX + box.size + tolerance) ||
+            worldY !in (box.bottomY - tolerance)..(box.bottomY + box.size + tolerance) ||
+            worldZ !in (box.minZ - tolerance)..(box.minZ + box.size + tolerance)
+        ) return false
+        val support = box.floorY
+        return support == null || worldY >= support + ScanBox.TABLE_BAND
     }
 }
