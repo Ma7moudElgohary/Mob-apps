@@ -167,8 +167,9 @@ class ArScanView(
         val cameraPos = Vector3(pose.tx(), pose.ty(), pose.tz())
         val t = target
         if (t != null) {
-            // Coverage should advance only when this frame contributed fresh depth samples.
-            if (integrated.integratedPoints > 0) {
+            // Do not award a coverage sector for a noisy frame containing only a few isolated
+            // samples. The threshold is intentionally low enough for 160x120 raw-depth devices.
+            if (integrated.integratedPoints >= MIN_POINTS_FOR_COVERAGE) {
                 coverageState = coach.update(
                     cameraPos,
                     t,
@@ -190,5 +191,9 @@ class ArScanView(
     } else {
         @Suppress("DEPRECATION")
         activity.windowManager.defaultDisplay.rotation
+    }
+
+    private companion object {
+        const val MIN_POINTS_FOR_COVERAGE = 32
     }
 }
