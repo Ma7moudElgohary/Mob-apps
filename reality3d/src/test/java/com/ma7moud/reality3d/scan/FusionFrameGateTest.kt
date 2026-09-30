@@ -48,6 +48,20 @@ class FusionFrameGateTest {
         )
     }
 
+    private fun constantDepthInObjectRegion(source: DepthFrame, millimetres: Int): DepthFrame {
+        val depth = ShortArray(source.depthMm.size)
+        val confidence = ByteArray(source.depthMm.size)
+        val region = projectedRegion(source)
+        for (y in region[1] until region[3]) {
+            for (x in region[0] until region[2]) {
+                val index = y * source.width + x
+                depth[index] = millimetres.toShort()
+                confidence[index] = 220.toByte()
+            }
+        }
+        return DepthFrame(source.width, source.height, depth, source.intrinsics, source.pose, confidence)
+    }
+
     @Test
     fun aimedFrameAtUsefulDistanceIsAccepted() {
         val frame = SyntheticScan.depthFrame(aimedPose())
@@ -102,6 +116,23 @@ class FusionFrameGateTest {
         }
         val frame = DepthFrame(source.width, source.height, depth, source.intrinsics, source.pose)
         assertFalse(FusionFrameGate.accept(frame, box))
+    }
+
+    @Test
+    fun wallBehindObjectSilhouetteIsRejectedIn3d() {
+        val source = SyntheticScan.depthFrame(aimedPose())
+        // Every pixel in the correct 2D object region has strong depth, but at 1 m the points lie well
+        // behind this 30 cm scan box. A 2D-only gate would accept this as a good object frame.
+        val wall = constantDepthInObjectRegion(source, millimetres = 1_000)
+        assertFalse(FusionFrameGate.accept(wall, box))
+    }
+
+    @Test
+    fun foregroundDepthInFrontOfScanBoxIsRejectedIn3d() {
+        val source = SyntheticScan.depthFrame(aimedPose())
+        // Likewise, a near occluder over the object's silhouette must not be mistaken for object geometry.
+        val occluder = constantDepthInObjectRegion(source, millimetres = 100)
+        assertFalse(FusionFrameGate.accept(occluder, box))
     }
 
     @Test
