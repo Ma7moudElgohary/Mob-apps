@@ -150,7 +150,7 @@ class ArScanView(
         bg.draw(frame)
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
-            val state = coverageState.copy(trackingGood = false)
+            val state = coverageState.copy(trackingGood = false, frameUsable = false)
             coverageState = state
             activity.runOnUiThread { callbacks.onCoverage(state) }
             return
@@ -158,31 +158,47 @@ class ArScanView(
         frameCounter++
         if (frameCounter % 6 != 0 || finishing) return
 
+        val previousDepthTimestamp = lastDepthTimestamp
         val integrated = RawDepthIntegrator.integrate(
             frame = frame,
             volume = volume,
             existingTarget = target,
-            lastDepthTimestamp = lastDepthTimestamp,
+            lastDepthTimestamp = previousDepthTimestamp,
         )
         lastDepthTimestamp = integrated.depthTimestamp
         target = integrated.target
 
+        // Raw depth may be reprojected for several render frames. Only evaluate capture quality
+        // when ARCore produced a new raw-depth image, otherwise stale frames would look like
+        // zero-confidence captures and distort motion estimates.
+        val hasFreshDepth = integrated.depthTimestamp != null &&
+            integrated.depthTimestamp != previousDepthTimestamp
+        if (!hasFreshDepth) return
+
         val pose = camera.pose
         val cameraPos = Vector3(pose.tx(), pose.ty(), pose.tz())
+        // ARCore physical camera convention is OpenGL-like: local -Z points where the camera
+        // looks. Transform a point one meter down -Z and subtract the camera translation to get
+        // a stable world-space forward vector without depending on an extra Pose helper API.
+        val forwardPoint = pose.transformPoint(floatArrayOf(0f, 0f, -1f))
+        val cameraForward = Vector3(
+            forwardPoint[0] - cameraPos.x,
+            forwardPoint[1] - cameraPos.y,
+            forwardPoint[2] - cameraPos.z,
+        ).normalized()
+
         val t = target
         if (t != null) {
-            // Do not award a coverage sector for a noisy frame containing only a few isolated
-            // samples. The threshold is intentionally low enough for 160x120 raw-depth devices.
-            if (integrated.integratedPoints >= MIN_POINTS_FOR_COVERAGE) {
-                coverageState = coach.update(
-                    cameraPos,
-                    t,
-                    frame.timestamp,
-                    integrated.meanConfidence,
-                    true,
-                )
-                activity.runOnUiThread { callbacks.onCoverage(coverageState) }
-            }
+            coverageState = coach.update(
+                camera = cameraPos,
+                cameraForward = cameraForward,
+                target = t,
+                nowNanos = frame.timestamp,
+                depthConfidence = integrated.meanConfidence,
+                depthPointCount = integrated.integratedPoints,
+                trackingGood = true,
+            )
+            activity.runOnUiThread { callbacks.onCoverage(coverageState) }
         } else {
             activity.runOnUiThread {
                 callbacks.onStatus("Point the center reticle at the object and move slightly sideways to initialize depth.")
@@ -195,9 +211,5 @@ class ArScanView(
     } else {
         @Suppress("DEPRECATION")
         activity.windowManager.defaultDisplay.rotation
-    }
-
-    private companion object {
-        const val MIN_POINTS_FOR_COVERAGE = 32
     }
 }

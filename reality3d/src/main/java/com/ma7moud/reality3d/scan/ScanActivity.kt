@@ -63,7 +63,8 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                 } else {
                     Text("Camera permission is required for Scan 360", Modifier.align(Alignment.Center), color = Color.White)
                 }
-                Box(Modifier.size(24.dp).align(Alignment.Center).background(Color(0x553FFFFF), CircleShape))
+                val reticleColor = if (coverage.frameUsable) Color(0xAA45F57A) else Color(0x663FFFFF)
+                Box(Modifier.size(24.dp).align(Alignment.Center).background(reticleColor, CircleShape))
                 Column(
                     Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -72,7 +73,11 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                     Spacer(Modifier.height(8.dp))
                     Text("${coverage.coveragePercent}% • ${coverage.message()}", color = Color.White)
                     Text(
-                        "Depth ${(coverage.depthConfidence * 100).toInt()}% • ${"%.2f".format(coverage.distanceMeters)} m",
+                        "Depth ${(coverage.depthConfidence * 100).toInt()}% • ${coverage.depthPointCount} pts • ${"%.2f".format(coverage.distanceMeters)} m",
+                        color = Color(0xFFB9C8D8),
+                    )
+                    Text(
+                        "Aim ${"%.0f".format(coverage.aimErrorDegrees)}° • Motion ${"%.2f".format(coverage.speedMetersPerSecond)} m/s • ${"%.0f".format(coverage.angularSpeedDegreesPerSecond)}°/s",
                         color = Color(0xFFB9C8D8),
                     )
                     if (status != coverage.message()) Text(status, color = Color(0xFFB9C8D8))
