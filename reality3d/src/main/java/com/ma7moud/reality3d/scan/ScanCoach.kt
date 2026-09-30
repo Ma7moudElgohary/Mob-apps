@@ -24,6 +24,8 @@ class CoachInput(
     val turnRate: Float,
     /** Share of the object's projected area with confident, 3D-consistent depth (0..1). */
     val depthQuality: Float?,
+    /** Share of reconstructed surface directly backed by measured TSDF evidence (0..1). */
+    val surfaceCompleteness: Float?,
     val coverage: BooleanArray,
     val phoneAzimuth: Float?,
     val phoneRing: Int?,
@@ -32,7 +34,7 @@ class CoachInput(
 /** Turns what the phone sees into one instruction at a time, the most pressing first. */
 object ScanCoach {
 
-    /** Coverage at which the scan counts as complete. */
+    /** Directional coverage at which all planned views count as complete. */
     const val COMPLETE = 0.85f
     const val MAX_SPEED = 0.35f
     const val MAX_TURN = 45f
@@ -45,8 +47,12 @@ object ScanCoach {
      */
     const val MAIN_LAPS = 2
 
-    /** Both main laps are covered: a model built now is good. */
+    /** Both main laps are directionally covered. Geometry readiness is checked by the overload below. */
     fun isEnough(coverage: BooleanArray): Boolean = (0 until MAIN_LAPS).all { ringFraction(coverage, it) >= RING_TARGET }
+
+    /** Enough directions plus enough directly measured reconstructed surface. */
+    fun isEnough(coverage: BooleanArray, surfaceCompleteness: Float?): Boolean =
+        isEnough(coverage) && surfaceCompleteness != null && surfaceCompleteness >= SurfaceCompleteness.GOOD
 
     /** How far the walk has got, for a progress bar: 0 to 1 over the main laps. */
     fun progress(coverage: BooleanArray): Float =
@@ -80,8 +86,19 @@ object ScanCoach {
         if (quality != null && quality < LOW_DEPTH) {
             return warning("Low detail here. Add light, or put a patterned cloth under the object.")
         }
+
+        val viewEnough = isEnough(input.coverage)
+        val surface = input.surfaceCompleteness
+        if (viewEnough && (surface == null || surface < SurfaceCompleteness.GOOD)) {
+            val measured = surface?.let { " (${(it * 100).roundToInt()}% measured)" } ?: ""
+            return CoachTip(
+                "The views are covered, but the shape still has gaps$measured. Add a few more views, especially higher and lower angles.",
+                CoachTip.Kind.INFO,
+            )
+        }
+
         val covered = input.coverage.count { it }.toFloat() / input.coverage.size
-        if (covered >= COMPLETE) {
+        if (covered >= COMPLETE && surface != null && surface >= SurfaceCompleteness.GOOD) {
             val text = if (input.coverage[CoverageTracker.TOP_CELL]) {
                 "Scan complete. Tap Build model."
             } else {
@@ -89,7 +106,7 @@ object ScanCoach {
             }
             return CoachTip(text, CoachTip.Kind.DONE)
         }
-        if (isEnough(input.coverage)) {
+        if (isEnough(input.coverage, surface)) {
             return CoachTip("That's enough. Tap Build model, or go around once more with the phone higher for a cleaner top.", CoachTip.Kind.DONE)
         }
         return CoachTip(direction(input), CoachTip.Kind.INFO)
@@ -140,7 +157,13 @@ object ScanCoach {
 /** How complete and trustworthy a finished scan is, and what would improve it. */
 object ScanQuality {
 
-    fun assess(coverage: BooleanArray, photos: Int, depthFrames: Int, depthQuality: Float?): QualityReport {
+    fun assess(
+        coverage: BooleanArray,
+        photos: Int,
+        depthFrames: Int,
+        depthQuality: Float?,
+        surfaceCompleteness: Float?,
+    ): QualityReport {
         val covered = coverage.count { it }.toFloat() / coverage.size
         val issues = ArrayList<String>()
         val ringNames = listOf("low", "45°", "high")
@@ -152,9 +175,15 @@ object ScanQuality {
         if (photos < GOOD_PHOTOS * 2 / 3) issues += "Only $photos photos, so the colours may be patchy."
         if (depthFrames < GOOD_DEPTH_FRAMES * 2 / 3) issues += "Only $depthFrames depth maps, so the shape may be rough."
         if (depthQuality != null && depthQuality < 0.4f) issues += "The depth was weak: more light or a textured surface underneath helps."
-        val score = covered * 55f +
+        if (surfaceCompleteness == null) {
+            issues += "Not enough reconstructed surface was measured to verify the shape."
+        } else if (surfaceCompleteness < SurfaceCompleteness.GOOD) {
+            issues += "Only ${(surfaceCompleteness * 100).roundToInt()}% of the reconstructed surface was directly measured; more views would reduce inferred geometry."
+        }
+        val score = covered * 35f +
+            (surfaceCompleteness ?: 0f).coerceIn(0f, 1f) * 25f +
             min(1f, photos / GOOD_PHOTOS.toFloat()) * 15f +
-            min(1f, depthFrames / GOOD_DEPTH_FRAMES.toFloat()) * 15f +
+            min(1f, depthFrames / GOOD_DEPTH_FRAMES.toFloat()) * 10f +
             (depthQuality ?: UNKNOWN_DEPTH_QUALITY).coerceIn(0f, 1f) * 15f
         return QualityReport(score.roundToInt().coerceIn(0, 100), issues)
     }
