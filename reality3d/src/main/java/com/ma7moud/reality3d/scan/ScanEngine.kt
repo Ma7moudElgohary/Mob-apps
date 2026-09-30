@@ -19,6 +19,8 @@ class ScanStatus(
     /** Covered cells, see [CoverageTracker]. */
     val coverage: BooleanArray = BooleanArray(CoverageTracker.CELLS),
     val coverageFraction: Float = 0f,
+    /** Share of reconstructed surface directly supported by TSDF measurements, rather than inferred fill. */
+    val surfaceCompleteness: Float? = null,
     val nextStep: CoverageTracker.Step = CoverageTracker.Step.LOW_RING,
     /** Where the phone is around the object, for the coverage radar. */
     val phoneAzimuth: Float? = null,
