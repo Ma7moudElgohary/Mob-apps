@@ -124,18 +124,33 @@ class ScanCoachTest {
     }
 
     @Test
-    fun depthQualityCountsConfidentPixelsOnTheObject() {
-        val pose = SyntheticScan.lookAt(0f, 0.2f, 0.6f, 0f, 0.1f, 0f)
+    fun depthQualityCountsOnlyConfident3dConsistentPixels() {
+        val pose = SyntheticScan.lookAt(0f, 0.1f, 0.6f, 0f, 0.1f, 0f)
         val intrinsics = Intrinsics(80f, 80f, 40f, 30f, 80, 60)
-        val depth = ShortArray(80 * 60) { 500 }
+        // A plane through the box centre: pixels in the projected box are geometrically valid object depth.
+        val depth = ShortArray(80 * 60) { 600 }
         val confident = ByteArray(80 * 60) { if (it % 2 == 0) 255.toByte() else 10 }
         val box = ScanBox(0f, 0f, 0f, 0.2f, 0f)
         val quality = DepthQuality.measure(DepthFrame(80, 60, depth, intrinsics, pose, confident), box)!!
-        assertEquals(0.5f, quality, 0.05f)
+        assertEquals(0.5f, quality, 0.08f)
         assertNull(DepthQuality.measure(DepthFrame(80, 60, depth, intrinsics, pose), box))
         // Behind the camera: no answer.
-        val away = SyntheticScan.lookAt(0f, 0.2f, 0.6f, 0f, 0.2f, 2f)
+        val away = SyntheticScan.lookAt(0f, 0.1f, 0.6f, 0f, 0.1f, 2f)
         assertNull(DepthQuality.measure(DepthFrame(80, 60, depth, intrinsics, away, confident), box))
+    }
+
+    @Test
+    fun depthQualityDoesNotRewardConfidentWallOrForegroundOccluder() {
+        val pose = SyntheticScan.lookAt(0f, 0.1f, 0.6f, 0f, 0.1f, 0f)
+        val intrinsics = Intrinsics(80f, 80f, 40f, 30f, 80, 60)
+        val confidence = ByteArray(80 * 60) { 255.toByte() }
+        val box = ScanBox(0f, 0f, 0f, 0.2f, 0f)
+
+        // Both maps have perfect confidence across the 2D silhouette, but neither surface is in the scan box.
+        val wall = DepthFrame(80, 60, ShortArray(80 * 60) { 1_200 }, intrinsics, pose, confidence)
+        val foreground = DepthFrame(80, 60, ShortArray(80 * 60) { 200 }, intrinsics, pose, confidence)
+        assertEquals(0f, DepthQuality.measure(wall, box)!!, 0f)
+        assertEquals(0f, DepthQuality.measure(foreground, box)!!, 0f)
     }
 
     @Test
