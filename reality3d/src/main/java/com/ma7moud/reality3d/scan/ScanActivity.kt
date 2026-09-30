@@ -28,10 +28,11 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
     private var coverage by mutableStateOf(CoverageState())
     private var status by mutableStateOf("Starting ARCore…")
     private var error by mutableStateOf<String?>(null)
+    private var savingResult by mutableStateOf(false)
     private var leavingForPause = false
     private lateinit var store: ProjectStore
     private var projectId: String? = null
-    private val tempScan by lazy { File(cacheDir, "reality3d_resume_scan.r3ds") }
+    private val tempScan by lazy { File(cacheDir, "scan_temp.r3ds") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -81,6 +82,18 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                         Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
                     }
                 }
+                if (savingResult) {
+                    Card(Modifier.align(Alignment.Center).padding(24.dp)) {
+                        Row(
+                            Modifier.padding(18.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                            Text("Saving reconstructed model…")
+                        }
+                    }
+                }
                 Row(
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -90,11 +103,12 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
                             leavingForPause = true
                             persistResume { finish() }
                         },
+                        enabled = !savingResult,
                         modifier = Modifier.weight(1f),
                     ) { Text("Pause") }
                     Button(
                         onClick = { scanView?.finishScan() },
-                        enabled = coverage.coveragePercent >= 30,
+                        enabled = !savingResult && coverage.coveragePercent >= 30,
                         modifier = Modifier.weight(1f),
                     ) { Text(if (coverage.coveragePercent >= 85) "Finish Scan" else "Build Preview") }
                 }
@@ -131,7 +145,7 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
     }
 
     override fun onPause() {
-        if (!leavingForPause) persistResume()
+        if (!leavingForPause && !savingResult) persistResume()
         scanView?.pauseAr()
         super.onPause()
     }
@@ -156,17 +170,43 @@ class ScanActivity : ComponentActivity(), ArScanView.Callbacks {
         coverageBins: BooleanArray,
     ) {
         if (mesh.triangleCount == 0) {
+            scanView?.allowFinishRetry()
             error = "Not enough overlapping depth data yet. Keep moving around the object."
             return
         }
-        val project = projectId?.let { id -> store.list().firstOrNull { it.id == id } }
-            ?: store.create("360 Scan", "scan360")
-        val saved = store.saveMesh(project, mesh, null, coverage.coveragePercent)
-        val file = File(cacheDir, "scan_${saved.id}.r3ds")
-        ScanSessionStore.save(file, volume, target, coverageBins)
-        store.attachScan(saved, file, coverage.coveragePercent)
-        setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_PROJECT_ID, saved.id))
-        finish()
+
+        savingResult = true
+        error = null
+        status = "Saving reconstructed model…"
+        leavingForPause = true
+        val finalCoverage = coverage.coveragePercent
+        val existingProjectId = projectId
+
+        Thread {
+            val result = runCatching {
+                val project = existingProjectId
+                    ?.let { id -> store.list().firstOrNull { it.id == id } }
+                    ?: store.create("360 Scan", "scan360")
+                val saved = store.saveMesh(project, mesh, null, finalCoverage)
+                val sessionFile = File(cacheDir, "scan_${saved.id}.r3ds")
+                ScanSessionStore.save(sessionFile, volume, target, coverageBins)
+                store.attachScan(saved, sessionFile, finalCoverage)
+            }
+
+            runOnUiThread {
+                result.onSuccess { savedProject ->
+                    savingResult = false
+                    setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_PROJECT_ID, savedProject.id))
+                    finish()
+                }.onFailure { failure ->
+                    savingResult = false
+                    leavingForPause = false
+                    scanView?.allowFinishRetry()
+                    error = "Could not save scan: ${failure.message ?: failure.javaClass.simpleName}"
+                    status = "Scan is still in memory — try Finish again."
+                }
+            }
+        }.start()
     }
 
     companion object {
