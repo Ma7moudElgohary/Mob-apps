@@ -44,19 +44,24 @@ class SparseTsdfVolume(
     private fun integrateVoxel(p: Vector3, tsdf: Float, confidence: Float, color: Int?) {
         val key = worldToKey(p)
         val voxel = voxels.getOrPut(key) { Voxel() }
-        val newWeight = (voxel.weight + confidence).coerceAtMost(64f)
-        val oldFactor = if (newWeight == 0f) 0f else voxel.weight / newWeight
-        val newFactor = confidence / newWeight
-        voxel.tsdf = voxel.tsdf * oldFactor + tsdf * newFactor
+
+        // Always compute the average using the true accumulated weight. The stored weight is
+        // capped only after averaging. Using the capped value as the denominator makes the old
+        // and new coefficients sum to > 1 once saturation is reached, causing TSDF/color drift.
+        val accumulatedWeight = voxel.weight + confidence
+        val oldFactor = if (accumulatedWeight <= 0f) 0f else voxel.weight / accumulatedWeight
+        val newFactor = if (accumulatedWeight <= 0f) 0f else confidence / accumulatedWeight
+        voxel.tsdf = (voxel.tsdf * oldFactor + tsdf * newFactor).coerceIn(-1f, 1f)
+
         color?.let {
             val rr = ((it shr 16) and 0xFF) / 255f
             val gg = ((it shr 8) and 0xFF) / 255f
             val bb = (it and 0xFF) / 255f
-            voxel.r = voxel.r * oldFactor + rr * newFactor
-            voxel.g = voxel.g * oldFactor + gg * newFactor
-            voxel.b = voxel.b * oldFactor + bb * newFactor
+            voxel.r = (voxel.r * oldFactor + rr * newFactor).coerceIn(0f, 1f)
+            voxel.g = (voxel.g * oldFactor + gg * newFactor).coerceIn(0f, 1f)
+            voxel.b = (voxel.b * oldFactor + bb * newFactor).coerceIn(0f, 1f)
         }
-        voxel.weight = newWeight
+        voxel.weight = accumulatedWeight.coerceAtMost(MAX_WEIGHT)
     }
 
     fun worldToKey(p: Vector3): Key = Key(
@@ -75,5 +80,9 @@ class SparseTsdfVolume(
     fun load(snapshot: Map<Key, Voxel>) {
         voxels.clear()
         snapshot.forEach { (k, v) -> voxels[k] = v.copy() }
+    }
+
+    private companion object {
+        const val MAX_WEIGHT = 64f
     }
 }
