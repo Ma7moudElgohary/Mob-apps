@@ -113,6 +113,10 @@ class ArScanView(
         }.start()
     }
 
+    fun allowFinishRetry() {
+        finishing = false
+    }
+
     fun saveSession(file: File, onSaved: ((Boolean) -> Unit)? = null) {
         val v = volume
         val t = target
