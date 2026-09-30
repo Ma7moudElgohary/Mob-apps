@@ -384,7 +384,7 @@ internal object FusionFrameGate {
     }
 
     /** Back-project one optical-axis depth sample into the ARCore world and compare it with the scan box. */
-    private fun depthPointNearBox(frame: DepthFrame, x: Int, y: Int, depthMm: Int, box: ScanBox): Boolean {
+    internal fun depthPointNearBox(frame: DepthFrame, x: Int, y: Int, depthMm: Int, box: ScanBox): Boolean {
         val depth = depthMm * 0.001f
         val k = frame.intrinsics
         val m = frame.pose.matrix
