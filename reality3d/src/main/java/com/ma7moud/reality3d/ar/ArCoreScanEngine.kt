@@ -506,11 +506,13 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             lastDepthAt = now
             framesSkippedForQuality.incrementAndGet()
         } else if (depthDue && fusing.compareAndSet(false, true)) {
+            // An acquisition attempt consumes this cadence slot even when raw depth has not advanced yet.
+            // Otherwise a repeated raw-depth timestamp would make the render loop retry every frame.
+            lastDepthAt = now
             val depth = acquireDepth(frame, camera, pose)
             if (depth == null) {
                 fusing.set(false)
             } else {
-                lastDepthAt = now
                 fusion.execute {
                     try {
                         val quality = DepthQuality.measure(depth, scanBox)
