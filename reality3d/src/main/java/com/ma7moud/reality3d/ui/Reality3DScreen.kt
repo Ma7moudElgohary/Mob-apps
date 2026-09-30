@@ -518,9 +518,21 @@ private fun QuickLocalPanel(
                     Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    FilterChip(editMode == null, { onEditMode(null) }, { Text("Select") })
-                    FilterChip(editMode == MaskOps.BrushMode.ADD, { onEditMode(MaskOps.BrushMode.ADD) }, { Text("Add") })
-                    FilterChip(editMode == MaskOps.BrushMode.ERASE, { onEditMode(MaskOps.BrushMode.ERASE) }, { Text("Erase") })
+                    FilterChip(
+                        selected = editMode == null,
+                        onClick = { onEditMode(null) },
+                        label = { Text("Select") },
+                    )
+                    FilterChip(
+                        selected = editMode == MaskOps.BrushMode.ADD,
+                        onClick = { onEditMode(MaskOps.BrushMode.ADD) },
+                        label = { Text("Add") },
+                    )
+                    FilterChip(
+                        selected = editMode == MaskOps.BrushMode.ERASE,
+                        onClick = { onEditMode(MaskOps.BrushMode.ERASE) },
+                        label = { Text("Erase") },
+                    )
                     OutlinedButton(onClick = onAutoRefine) { Text("Auto Refine") }
                     OutlinedButton(onClick = onFeather) { Text("Feather") }
                 }
@@ -564,7 +576,7 @@ private fun QuickLocalPanel(
         }
 
         if (benchmarkText.isNotBlank()) Text(benchmarkText, color = Color(0xFFC5B7FF))
-        advice?.let(::AdviceCard)
+        advice?.let { AdviceCard(it) }
 
         if (busy) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -582,13 +594,19 @@ private fun QuickLocalPanel(
                 Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                FilterChip(showOriginal, { onShowOriginal(!showOriginal) }) {
-                    Text(if (showOriginal) "Show 3D" else "Before / After")
-                }
+                FilterChip(
+                    selected = showOriginal,
+                    onClick = { onShowOriginal(!showOriginal) },
+                    label = { Text(if (showOriginal) "Show 3D" else "Before / After") },
+                )
                 ViewerMode.entries.forEach { available ->
-                    FilterChip(viewerMode == available, { onViewerMode(available) }) {
-                        Text(available.name.lowercase().replaceFirstChar { it.uppercase() })
-                    }
+                    FilterChip(
+                        selected = viewerMode == available,
+                        onClick = { onViewerMode(available) },
+                        label = {
+                            Text(available.name.lowercase().replaceFirstChar { it.uppercase() })
+                        },
+                    )
                 }
             }
 
@@ -628,16 +646,17 @@ private fun QuickLocalPanel(
                 Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                AssistChip({ viewer?.resetCamera() }, { Text("Reset") })
-                AssistChip({ viewer?.preset(ViewerPreset.FRONT) }, { Text("Front") })
-                AssistChip({ viewer?.preset(ViewerPreset.RIGHT) }, { Text("Right") })
-                AssistChip({ viewer?.preset(ViewerPreset.BACK) }, { Text("Back") })
-                AssistChip({ viewer?.preset(ViewerPreset.LEFT) }, { Text("Left") })
-                AssistChip({ viewer?.preset(ViewerPreset.TOP) }, { Text("Top") })
-                AssistChip({ viewer?.preset(ViewerPreset.ISO) }, { Text("ISO") })
-                AssistChip({ onAutoRotate(!autoRotate) }) {
-                    Text(if (autoRotate) "Stop Rotate" else "Auto Rotate")
-                }
+                AssistChip(onClick = { viewer?.resetCamera() }, label = { Text("Reset") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.FRONT) }, label = { Text("Front") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.RIGHT) }, label = { Text("Right") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.BACK) }, label = { Text("Back") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.LEFT) }, label = { Text("Left") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.TOP) }, label = { Text("Top") })
+                AssistChip(onClick = { viewer?.preset(ViewerPreset.ISO) }, label = { Text("ISO") })
+                AssistChip(
+                    onClick = { onAutoRotate(!autoRotate) },
+                    label = { Text(if (autoRotate) "Stop Rotate" else "Auto Rotate") },
+                )
             }
 
             Text("Light direction")
@@ -855,8 +874,16 @@ private fun Ai3dPanel(
             singleLine = true,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(engine == "sf3d", { onEngine("sf3d") }, { Text("Stable Fast 3D") })
-            FilterChip(engine == "hunyuan", { onEngine("hunyuan") }, { Text("Hunyuan3D") })
+            FilterChip(
+                selected = engine == "sf3d",
+                onClick = { onEngine("sf3d") },
+                label = { Text("Stable Fast 3D") },
+            )
+            FilterChip(
+                selected = engine == "hunyuan",
+                onClick = { onEngine("hunyuan") },
+                label = { Text("Hunyuan3D") },
+            )
         }
         if (bitmap == null) {
             Text("Choose a photo in Quick Local first.")
