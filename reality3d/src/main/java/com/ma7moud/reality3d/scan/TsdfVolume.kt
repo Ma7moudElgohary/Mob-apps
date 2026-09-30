@@ -5,6 +5,7 @@ import java.util.concurrent.ExecutorService
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * A truncated signed distance field over the scan box, fused from depth maps (KinectFusion style).
@@ -28,8 +29,19 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
     var frames: Int = 0
         private set
 
-    /** Fuses one depth map. With a [pool], z-slabs of the volume are processed in parallel. */
-    fun integrate(frame: DepthFrame, pool: ExecutorService? = null, threads: Int = 4) {
+    /**
+     * Fuses one usable depth map. With a [pool], z-slabs of the volume are processed in parallel.
+     *
+     * The volume is the final reconstruction boundary, so it defensively rejects frames that cannot
+     * describe the selected object: the box centre must be well inside the depth camera view, the camera
+     * must be at a sensible distance for the selected box size, and the map must contain usable depth.
+     * This prevents a caller bug or a transient ARCore frame from contaminating every later surface.
+     *
+     * @return true when the frame was accepted and fused; false when it was rejected before fusion.
+     */
+    fun integrate(frame: DepthFrame, pool: ExecutorService? = null, threads: Int = 4): Boolean {
+        if (!FusionFrameGate.accept(frame, box)) return false
+
         val confidence = pixelWeights(frame)
         val table = tableHits(frame)
         val m = frame.pose.matrix
@@ -56,6 +68,7 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
             pool.invokeAll(tasks).forEach { it.get() }
         }
         frames++
+        return true
     }
 
     /**
@@ -266,5 +279,66 @@ class TsdfVolume(val box: ScanBox, val resolution: Int = resolutionFor(box.size)
 
         /** About 3.5 mm voxels for small objects, capped at 128³ (16 MB) for large ones. */
         fun resolutionFor(size: Float): Int = (size / 0.0035f).roundToInt().coerceIn(48, 128)
+    }
+}
+
+/**
+ * Fast, deterministic checks that protect the TSDF from frames that cannot describe the selected object.
+ * These deliberately stay conservative: borderline frames are allowed and the per-pixel confidence/edge
+ * weighting in [TsdfVolume] decides how much they contribute.
+ */
+internal object FusionFrameGate {
+    private const val IMAGE_MARGIN = 0.05f
+    private const val MIN_VALID_SAMPLES = 4
+    private const val SAMPLE_GRID = 20
+    private const val MIN_RAW_CONFIDENCE = 38 // ~15%, matching TsdfVolume's per-pixel confidence floor.
+
+    fun accept(frame: DepthFrame, box: ScanBox): Boolean {
+        if (!sensibleDistance(frame.pose, box)) return false
+        if (!aimedAtBox(frame, box)) return false
+        return hasUsableDepth(frame)
+    }
+
+    private fun sensibleDistance(pose: CameraPose, box: ScanBox): Boolean {
+        val dx = pose.x - box.centerX
+        val dy = pose.y - box.centerY
+        val dz = pose.z - box.centerZ
+        val distance = sqrt(dx * dx + dy * dy + dz * dz)
+        val near = max(0.2f, box.size * 0.9f)
+        val far = max(0.8f, box.size * 3.5f)
+        return distance in near..far
+    }
+
+    private fun aimedAtBox(frame: DepthFrame, box: ScanBox): Boolean {
+        val projected = FloatArray(3)
+        if (!frame.pose.project(box.centerX, box.centerY, box.centerZ, frame.intrinsics, projected)) return false
+        val marginX = frame.width * IMAGE_MARGIN
+        val marginY = frame.height * IMAGE_MARGIN
+        return projected[0] in marginX..(frame.width - marginX) &&
+            projected[1] in marginY..(frame.height - marginY)
+    }
+
+    private fun hasUsableDepth(frame: DepthFrame): Boolean {
+        val stepX = max(1, frame.width / SAMPLE_GRID)
+        val stepY = max(1, frame.height / SAMPLE_GRID)
+        var good = 0
+        var y = stepY / 2
+        while (y < frame.height) {
+            var x = stepX / 2
+            while (x < frame.width) {
+                val index = y * frame.width + x
+                val depth = frame.depthMm[index].toInt() and 0xFFFF
+                if (depth in 1..4_000) {
+                    val confidence = frame.confidence
+                    if (confidence == null || (confidence[index].toInt() and 0xFF) >= MIN_RAW_CONFIDENCE) {
+                        good++
+                        if (good >= MIN_VALID_SAMPLES) return true
+                    }
+                }
+                x += stepX
+            }
+            y += stepY
+        }
+        return false
     }
 }
