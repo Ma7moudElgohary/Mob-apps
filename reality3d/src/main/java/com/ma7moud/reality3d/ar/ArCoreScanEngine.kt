@@ -37,6 +37,7 @@ import com.ma7moud.reality3d.scan.Keyframe
 import com.ma7moud.reality3d.scan.PhotoSet
 import com.ma7moud.reality3d.scan.KeyframeImage
 import com.ma7moud.reality3d.scan.KeyframeSelector
+import com.ma7moud.reality3d.scan.QualifiedCoverageTracker
 import com.ma7moud.reality3d.scan.ScanBox
 import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanCoach
@@ -99,6 +100,8 @@ internal object ArCoreSupport {
 /**
  * Scanning with ARCore: tracks the phone, fuses ARCore depth maps into a [TsdfVolume] over the scan box
  * about four times a second, and keeps photos from evenly spread directions for colouring and export.
+ * Coverage is reconstruction-qualified: a viewpoint counts only after both a photo and usable fused depth
+ * have been captured from that direction.
  *
  * Raw depth is fused, weighted by ARCore's confidence, falling back to smoothed depth while raw depth
  * isn't available. An ARCore anchor at the box follows ARCore's corrections to its map, so camera poses
@@ -142,7 +145,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
 
     // Guarded by scanLock: the GL thread fills them while the buttons reset them.
     private val scanLock = Any()
-    private val coverage = CoverageTracker()
+    private val coverage = QualifiedCoverageTracker()
     private val selector = KeyframeSelector()
     private val keyframes = CopyOnWriteArrayList<Keyframe>()
     private val depthFrames = AtomicInteger()
@@ -206,6 +209,9 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             append(", depth map ${depthSize ?: "none yet"}")
             append(" · depth maps acquired: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
             append(" · depth maps fused: ${depthFrames.get()}")
+            synchronized(scanLock) {
+                append(" · reconstruction-qualified views: ${coverage.qualifiedCells}/${CoverageTracker.CELLS}")
+            }
             append(" · frames skipped while the box anchor was lost: ${framesSkippedForAnchor.get()}")
             append(" · frames skipped for aim/motion/distance/depth quality: ${framesSkippedForQuality.get()}")
             append(" · surface found: ${surfaceFoundAfterMs?.let { "after ${it / 1000} s" } ?: "no"}")
@@ -510,9 +516,10 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                         val quality = DepthQuality.measure(depth, scanBox)
                         if (scanVolume.integrate(depth, pool, FUSION_THREADS)) {
                             depthFrames.incrementAndGet()
-                            quality?.let {
-                                depthQuality = it
-                                synchronized(scanLock) {
+                            quality?.let { depthQuality = it }
+                            synchronized(scanLock) {
+                                coverage.markDepth(cell)
+                                quality?.let {
                                     qualitySum += it
                                     qualityCount++
                                 }
@@ -549,7 +556,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 val intrinsics = intrinsicsOf(camera, texture = false).scaledTo(nv21.width, nv21.height)
                 synchronized(scanLock) {
                     selector.add(toCamera)
-                    coverage.mark(cell)
+                    coverage.markPhoto(cell)
                 }
                 encoding.set(true)
                 encoder.execute {
@@ -689,7 +696,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         }
         overlay.draw(GLES30.GL_POINTS, overlayVertices, count, overlayProjection, pointSize = 10f)
         if (!scanning) return
-        // Coverage dome: one dot per direction, green once photographed.
+        // Coverage dome: green only when this direction has both an accepted photo and successfully fused depth.
         count = 0
         val radius = scanBox.size * 0.85f
         val covered = synchronized(scanLock) { coverage.covered.copyOf() }
