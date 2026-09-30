@@ -16,10 +16,24 @@ class ScanCoachTest {
         speed: Float = 0.1f,
         turnRate: Float = 10f,
         depthQuality: Float? = 0.8f,
+        surfaceCompleteness: Float? = 0.8f,
         coverage: BooleanArray = BooleanArray(CoverageTracker.CELLS),
         azimuth: Float? = 15f,
         ring: Int? = 0,
-    ) = CoachInput(trackingProblem, anchorLost, boxInView, distance, 0.4f, speed, turnRate, depthQuality, coverage, azimuth, ring)
+    ) = CoachInput(
+        trackingProblem,
+        anchorLost,
+        boxInView,
+        distance,
+        0.4f,
+        speed,
+        turnRate,
+        depthQuality,
+        surfaceCompleteness,
+        coverage,
+        azimuth,
+        ring,
+    )
 
     private fun covered(vararg cells: Int) = BooleanArray(CoverageTracker.CELLS).also { c -> cells.forEach { c[it] = true } }
 
@@ -76,6 +90,25 @@ class ScanCoachTest {
     }
 
     @Test
+    fun measuredSurfaceIsRequiredBeforeViewsCanFinishTheScan() {
+        val twoLaps = covered(*IntArray(2 * CoverageTracker.SEGMENTS) { it }.filter { it % CoverageTracker.SEGMENTS < 9 }.toIntArray())
+        assertTrue(ScanCoach.isEnough(twoLaps))
+        assertFalse(ScanCoach.isEnough(twoLaps, null))
+        assertFalse(ScanCoach.isEnough(twoLaps, SurfaceCompleteness.GOOD - 0.01f))
+        assertTrue(ScanCoach.isEnough(twoLaps, SurfaceCompleteness.GOOD))
+
+        val missingShape = ScanCoach.advise(
+            input(coverage = twoLaps, ring = 1, surfaceCompleteness = SurfaceCompleteness.GOOD - 0.08f),
+        )
+        assertEquals(CoachTip.Kind.INFO, missingShape.kind)
+        assertTrue(missingShape.text.contains("shape still has gaps"))
+        assertTrue(missingShape.text.contains("measured"))
+
+        val ready = ScanCoach.advise(input(coverage = twoLaps, ring = 1, surfaceCompleteness = SurfaceCompleteness.GOOD))
+        assertEquals(CoachTip.Kind.DONE, ready.kind)
+    }
+
+    @Test
     fun twoLapsAreEnoughAndTheProgressFollowsThem() {
         val none = BooleanArray(CoverageTracker.CELLS)
         assertFalse(ScanCoach.isEnough(none))
@@ -108,19 +141,20 @@ class ScanCoachTest {
     @Test
     fun qualityRewardsFullCoverageAndGoodDepth() {
         val full = BooleanArray(CoverageTracker.CELLS) { true }
-        val great = ScanQuality.assess(full, photos = 40, depthFrames = 70, depthQuality = 0.9f)
-        assertTrue(great.score >= 95)
+        val great = ScanQuality.assess(full, photos = 40, depthFrames = 70, depthQuality = 0.9f, surfaceCompleteness = 0.9f)
+        assertTrue(great.score >= 90)
         assertEquals("Excellent", great.grade)
         assertTrue(great.issues.isEmpty())
 
         val half = BooleanArray(CoverageTracker.CELLS) { it < CoverageTracker.SEGMENTS + 4 }
-        val weak = ScanQuality.assess(half, photos = 10, depthFrames = 20, depthQuality = 0.3f)
+        val weak = ScanQuality.assess(half, photos = 10, depthFrames = 20, depthQuality = 0.3f, surfaceCompleteness = 0.2f)
         assertTrue(weak.score < 50)
         assertEquals("Poor", weak.grade)
         assertTrue(weak.issues.any { it.startsWith("Some 45° views are missing") })
         assertTrue(weak.issues.any { it.startsWith("No view from straight above") })
         assertTrue(weak.issues.any { it.startsWith("Only 10 photos") })
         assertTrue(weak.issues.any { it.startsWith("The depth was weak") })
+        assertTrue(weak.issues.any { it.contains("reconstructed surface") })
     }
 
     @Test

@@ -94,6 +94,7 @@ import com.ma7moud.reality3d.scan.ScanCoach
 import com.ma7moud.reality3d.scan.ScanGuide
 import com.ma7moud.reality3d.scan.ScanPhase
 import com.ma7moud.reality3d.scan.ScanStatus
+import com.ma7moud.reality3d.scan.SurfaceCompleteness
 import com.ma7moud.reality3d.scan.VoiceGuide
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -320,10 +321,10 @@ private fun CameraScan(
         }
     }
 
-    // A tap of the phone for every new side covered, and a longer one when the scan is enough to build.
+    // A tap of the phone for every new side covered, and a longer one when views plus measured geometry are enough.
     val haptics = LocalHapticFeedback.current
     val coveredSides = status.coverage.count { it }
-    val enough = ScanCoach.isEnough(status.coverage)
+    val enough = ScanCoach.isEnough(status.coverage, status.surfaceCompleteness)
     var previousSides by remember { mutableIntStateOf(coveredSides) }
     var wasEnough by remember { mutableStateOf(enough) }
     LaunchedEffect(coveredSides, enough) {
@@ -518,13 +519,14 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
             Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Panel).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            val enough = ScanCoach.isEnough(status.coverage)
+            val enough = ScanCoach.isEnough(status.coverage, status.surfaceCompleteness)
             val lap = ScanCoach.currentLap(status.coverage)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 CoverageRadar(status, Modifier.size(96.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     val (done, sides) = ScanCoach.sidesCovered(status.coverage, lap)
-                    val complete = status.coverageFraction >= ScanCoach.COMPLETE
+                    val complete = status.coverageFraction >= ScanCoach.COMPLETE &&
+                        (status.surfaceCompleteness ?: 0f) >= SurfaceCompleteness.GOOD
                     Text(
                         when {
                             complete -> "Everything is covered"
@@ -542,10 +544,17 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
                         trackColor = Color.White.copy(alpha = 0.18f),
                     )
                     Text("Covered ${(status.coverageFraction * 100).roundToInt()}%", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+                    status.surfaceCompleteness?.let {
+                        Text("Measured shape ${(it * 100).roundToInt()}%", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+                    }
                     Text("${status.photos} photos · ${status.depthFrames} depth maps", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            val canBuild = status.coverageFraction >= MIN_COVERAGE && status.depthFrames > 0
+            val surface = status.surfaceCompleteness
+            val canBuild = status.coverageFraction >= MIN_COVERAGE &&
+                status.depthFrames > 0 &&
+                surface != null &&
+                surface >= SurfaceCompleteness.MIN_BUILD
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(onClick = onRestart, modifier = Modifier.weight(0.4f).height(52.dp)) { Text("Restart") }
                 Button(
@@ -555,7 +564,17 @@ private fun ScanPanel(status: ScanStatus, engine: ScanEngine, onBuild: () -> Uni
                     colors = if (enough) ButtonDefaults.buttonColors(containerColor = Covered, contentColor = Color(0xFF07130D)) else ButtonDefaults.buttonColors(),
                 ) { Text("Build model", style = MaterialTheme.typography.titleMedium) }
             }
-            if (!canBuild) Text("Go around at least once before building.", color = Color(0xFFB8C4D9), style = MaterialTheme.typography.bodySmall)
+            if (!canBuild) {
+                Text(
+                    when {
+                        status.coverageFraction < MIN_COVERAGE -> "Go around at least once before building."
+                        status.depthFrames == 0 || surface == null -> "Keep scanning until enough of the object's shape has been measured."
+                        else -> "Only ${(surface * 100).roundToInt()}% of the shape is measured. Add a few more views before building."
+                    },
+                    color = Color(0xFFB8C4D9),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             FilledTonalButton(
                 onClick = onComputer,
                 enabled = status.photos >= MIN_PHOTOS_FOR_COMPUTER,
