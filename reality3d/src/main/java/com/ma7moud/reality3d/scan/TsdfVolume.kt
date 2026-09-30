@@ -295,6 +295,8 @@ internal object FusionFrameGate {
     private const val MIN_VALID_FRACTION = 0.02f
     private const val SAMPLE_GRID = 20
     private const val MIN_RAW_CONFIDENCE = 38 // ~15%, matching TsdfVolume's per-pixel confidence floor.
+    private const val MIN_BOX_TOLERANCE = 0.03f
+    private const val BOX_TOLERANCE_RATIO = 0.10f
 
     private data class Region(val left: Int, val top: Int, val right: Int, val bottom: Int) {
         val width: Int get() = right - left
@@ -305,7 +307,7 @@ internal object FusionFrameGate {
         if (!sensibleDistance(frame.pose, box)) return false
         if (!aimedAtBox(frame, box)) return false
         val region = projectedBoxRegion(frame, box) ?: return false
-        return hasUsableDepth(frame, region)
+        return hasUsableDepth(frame, region, box)
     }
 
     private fun sensibleDistance(pose: CameraPose, box: ScanBox): Boolean {
@@ -352,10 +354,11 @@ internal object FusionFrameGate {
     }
 
     /**
-     * Raw depth may be sparse, so only a small fraction is required. The important part is that those
-     * samples are inside the selected object's projected box instead of anywhere in the background.
+     * Raw depth may be sparse, so only a small fraction is required. A sample counts only when it has
+     * usable confidence and back-projects to a 3D point on or near the selected scan volume. This rejects
+     * a wall or other background surface that happens to sit behind the object's 2D silhouette.
      */
-    private fun hasUsableDepth(frame: DepthFrame, region: Region): Boolean {
+    private fun hasUsableDepth(frame: DepthFrame, region: Region, box: ScanBox): Boolean {
         val stepX = max(1, region.width / SAMPLE_GRID)
         val stepY = max(1, region.height / SAMPLE_GRID)
         var good = 0
@@ -366,10 +369,11 @@ internal object FusionFrameGate {
             while (x < region.right) {
                 sampled++
                 val index = y * frame.width + x
-                val depth = frame.depthMm[index].toInt() and 0xFFFF
-                if (depth in 1..4_000) {
+                val depthMm = frame.depthMm[index].toInt() and 0xFFFF
+                if (depthMm in 1..4_000) {
                     val confidence = frame.confidence
-                    if (confidence == null || (confidence[index].toInt() and 0xFF) >= MIN_RAW_CONFIDENCE) good++
+                    val confident = confidence == null || (confidence[index].toInt() and 0xFF) >= MIN_RAW_CONFIDENCE
+                    if (confident && depthPointNearBox(frame, x, y, depthMm, box)) good++
                 }
                 x += stepX
             }
@@ -377,5 +381,21 @@ internal object FusionFrameGate {
         }
         if (sampled == 0 || good < MIN_VALID_SAMPLES) return false
         return good.toFloat() / sampled >= MIN_VALID_FRACTION
+    }
+
+    /** Back-project one optical-axis depth sample into the ARCore world and compare it with the scan box. */
+    private fun depthPointNearBox(frame: DepthFrame, x: Int, y: Int, depthMm: Int, box: ScanBox): Boolean {
+        val depth = depthMm * 0.001f
+        val k = frame.intrinsics
+        val m = frame.pose.matrix
+        val cameraX = (x - k.cx) / k.fx * depth
+        val cameraY = (k.cy - y) / k.fy * depth
+        val worldX = m[12] + m[0] * cameraX + m[4] * cameraY - m[8] * depth
+        val worldY = m[13] + m[1] * cameraX + m[5] * cameraY - m[9] * depth
+        val worldZ = m[14] + m[2] * cameraX + m[6] * cameraY - m[10] * depth
+        val tolerance = max(MIN_BOX_TOLERANCE, box.size * BOX_TOLERANCE_RATIO)
+        return worldX in (box.minX - tolerance)..(box.minX + box.size + tolerance) &&
+            worldY in (box.bottomY - tolerance)..(box.bottomY + box.size + tolerance) &&
+            worldZ in (box.minZ - tolerance)..(box.minZ + box.size + tolerance)
     }
 }
