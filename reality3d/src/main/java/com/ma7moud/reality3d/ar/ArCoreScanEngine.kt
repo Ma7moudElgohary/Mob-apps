@@ -49,6 +49,7 @@ import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanReconstructor
 import com.ma7moud.reality3d.scan.ScanStatus
 import com.ma7moud.reality3d.scan.ScanSupport
+import com.ma7moud.reality3d.scan.SurfaceCompleteness
 import com.ma7moud.reality3d.scan.TsdfVolume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -138,6 +139,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     @Volatile private var distance: Float? = null
     @Volatile private var boxInView = true
     @Volatile private var depthQuality: Float? = null
+    @Volatile private var surfaceCompleteness: Float? = null
     private val taps = ConcurrentLinkedQueue<FloatArray>()
 
     /** Work for the GL thread, which owns the ARCore anchor. */
@@ -209,6 +211,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             append(", depth map ${depthSize ?: "none yet"}")
             append(" · depth maps acquired: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
             append(" · depth maps fused: ${depthFrames.get()}")
+            surfaceCompleteness?.let { append(" · measured reconstructed surface: ${(it * 100).toInt()}%") }
             synchronized(scanLock) {
                 append(" · reconstruction-qualified views: ${coverage.qualifiedCells}/${CoverageTracker.CELLS}")
             }
@@ -247,6 +250,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             framesSkippedForQuality.set(0)
             qualitySum = 0.0
             qualityCount = 0
+            surfaceCompleteness = null
             volume = TsdfVolume(current)
             message = null
             phase = ScanPhase.SCANNING
@@ -272,6 +276,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             framesSkippedForQuality.set(0)
             qualitySum = 0.0
             qualityCount = 0
+            surfaceCompleteness = null
             phase = if (box != null) ScanPhase.READY else ScanPhase.PLACE_BOX
         }
         glActions.offer { dropAnchor() }
@@ -318,11 +323,18 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         publish(force = true)
         progress("Finishing the depth maps…")
         fusion.submit {}.get()
+        surfaceCompleteness = SurfaceCompleteness.measure(scanned)
         encoder.submit {}.get()
         val photos = keyframes.toList()
         val mesh = ScanReconstructor.reconstruct(scanned, photos.size, { decode(photos[it]) }, photos.firstOrNull()?.pose, progress)
         val quality = synchronized(scanLock) {
-            ScanQuality.assess(coverage.covered.copyOf(), photos.size, depthFrames.get(), if (qualityCount > 0) (qualitySum / qualityCount).toFloat() else null)
+            ScanQuality.assess(
+                coverage.covered.copyOf(),
+                photos.size,
+                depthFrames.get(),
+                if (qualityCount > 0) (qualitySum / qualityCount).toFloat() else null,
+                surfaceCompleteness,
+            )
         }
         ScanCapture(mesh, photos, quality)
     }
@@ -517,7 +529,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                     try {
                         val quality = DepthQuality.measure(depth, scanBox)
                         if (scanVolume.integrate(depth, pool, FUSION_THREADS)) {
-                            depthFrames.incrementAndGet()
+                            val fused = depthFrames.incrementAndGet()
                             quality?.let { depthQuality = it }
                             synchronized(scanLock) {
                                 coverage.markDepth(cell)
@@ -525,6 +537,9 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                                     qualitySum += it
                                     qualityCount++
                                 }
+                            }
+                            if (fused % SURFACE_COMPLETENESS_INTERVAL == 0) {
+                                surfaceCompleteness = SurfaceCompleteness.measure(scanVolume)
                             }
                         } else {
                             framesSkippedForQuality.incrementAndGet()
@@ -754,6 +769,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                     speed = speed,
                     turnRate = turnRate,
                     depthQuality = depthQuality,
+                    surfaceCompleteness = surfaceCompleteness,
                     coverage = covered,
                     phoneAzimuth = phoneAzimuth,
                     phoneRing = phoneRing,
@@ -765,6 +781,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 boxSize = boxSize,
                 coverage = covered,
                 coverageFraction = coverage.fraction,
+                surfaceCompleteness = surfaceCompleteness,
                 nextStep = coverage.nextStep(),
                 phoneAzimuth = phoneAzimuth,
                 phoneRing = phoneRing,
@@ -840,6 +857,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         const val FUSION_THREADS = 4
         const val DEPTH_INTERVAL_MS = 250L
         const val PUBLISH_INTERVAL_MS = 150L
+        const val SURFACE_COMPLETENESS_INTERVAL = 8
         const val MAX_PHOTOS = 150
         const val JPEG_QUALITY = 90
         const val MAX_TURN_DEG_PER_S = 45f
