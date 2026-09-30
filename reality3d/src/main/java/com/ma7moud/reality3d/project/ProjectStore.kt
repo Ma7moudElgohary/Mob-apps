@@ -68,7 +68,7 @@ class ProjectStore(private val context: Context) {
         val updated = project.copy(
             updatedAt = System.currentTimeMillis(),
             scanPath = target.absolutePath,
-            status = "scanning",
+            status = if (project.meshPath != null || project.status == "ready") "ready" else "scanning",
             coverage = coverage,
         )
         writeMeta(dir, updated)
