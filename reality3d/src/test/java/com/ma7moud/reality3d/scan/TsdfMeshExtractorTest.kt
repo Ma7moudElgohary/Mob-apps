@@ -29,7 +29,7 @@ class TsdfMeshExtractorTest {
         volume.load(snapshot)
 
         val mesh = TsdfMeshExtractor.extract(volume, minWeight = 0.1f)
-        val vertexCount = mesh.vertices.size / 3
+        val vertexCount = mesh.positions.size / 3
 
         assertEquals(8, mesh.indices.size / 3)
         assertEquals(9, vertexCount)
@@ -37,7 +37,7 @@ class TsdfMeshExtractorTest {
         assertTrue(vertexCount < mesh.indices.size)
 
         for (i in 0 until vertexCount) {
-            assertEquals(0.5f, mesh.vertices[i * 3], 1e-5f)
+            assertEquals(0.5f, mesh.positions[i * 3], 1e-5f)
         }
     }
 }
