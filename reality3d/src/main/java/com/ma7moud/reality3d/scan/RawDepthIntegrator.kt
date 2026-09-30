@@ -12,7 +12,7 @@ import kotlin.math.abs
 internal data class IntegrationResult(
     val target: Vector3?,
     val meanConfidence: Float,
-    val integratedPoints: Int,
+    val usablePoints: Int,
     val depthTimestamp: Long?,
 )
 
@@ -30,6 +30,7 @@ internal object RawDepthIntegrator {
         existingTarget: Vector3?,
         lastDepthTimestamp: Long? = null,
         maxRadiusMeters: Float = 1.35f,
+        fuseIntoVolume: Boolean = true,
     ): IntegrationResult {
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
@@ -52,7 +53,13 @@ internal object RawDepthIntegrator {
             }
 
             confidenceImage = frame.acquireRawDepthConfidenceImage()
-            cameraImage = runCatching { frame.acquireCameraImage() }.getOrNull()
+            // Color registration is only needed for frames that are allowed to change the TSDF.
+            // Pose-rejected frames still inspect depth/confidence for live quality guidance.
+            cameraImage = if (fuseIntoVolume) {
+                runCatching { frame.acquireCameraImage() }.getOrNull()
+            } else {
+                null
+            }
 
             val depthPlane = depthImage.planes[0]
             val confidencePlane = confidenceImage.planes[0]
@@ -85,13 +92,13 @@ internal object RawDepthIntegrator {
             )
 
             // The RGB CPU image generally has a different crop/aspect ratio from raw depth.
-            // Transform the full camera texture region into CPU-image pixels once per frame and
-            // use it to register depth samples to the correct color rows.
+            // Transform the full camera texture region into CPU-image pixels once per fused frame
+            // and use it to register depth samples to the correct color rows.
             val imageRegion = cameraImage?.let { mapTextureRegionToCpuImage(frame) }
 
             var confidenceSum = 0f
             var confidenceCount = 0
-            var integrated = 0
+            var usablePoints = 0
             val step = when {
                 depthWidth >= 500 -> 5
                 depthWidth >= 300 -> 4
@@ -128,33 +135,34 @@ internal object RawDepthIntegrator {
                     val world = Vector3(worldArray[0], worldArray[1], worldArray[2])
                     if (target != null && (world - target).length() > maxRadiusMeters) continue
 
-                    // Quality must describe samples that actually belong to the scan target, not
+                    // Quality describes samples that actually belong to the scan target, not
                     // high-confidence background pixels rejected by the radius gate.
                     confidenceSum += confidence
                     confidenceCount++
+                    usablePoints++
 
-                    val color = if (cameraImage != null && imageRegion != null) {
-                        sampleRegisteredYuvRgb(
-                            image = cameraImage,
-                            depthX = x,
-                            depthY = y,
-                            depthWidth = depthWidth,
-                            depthHeight = depthHeight,
-                            imageRegion = imageRegion,
-                        )
-                    } else {
-                        null
+                    if (fuseIntoVolume) {
+                        val color = if (cameraImage != null && imageRegion != null) {
+                            sampleRegisteredYuvRgb(
+                                image = cameraImage,
+                                depthX = x,
+                                depthY = y,
+                                depthWidth = depthWidth,
+                                depthHeight = depthHeight,
+                                imageRegion = imageRegion,
+                            )
+                        } else {
+                            null
+                        }
+                        volume.integrateSurfacePoint(cameraPos, world, confidence, color)
                     }
-
-                    volume.integrateSurfacePoint(cameraPos, world, confidence, color)
-                    integrated++
                 }
             }
 
             return IntegrationResult(
                 target = target,
                 meanConfidence = if (confidenceCount == 0) 0f else confidenceSum / confidenceCount,
-                integratedPoints = integrated,
+                usablePoints = usablePoints,
                 depthTimestamp = currentDepthTimestamp,
             )
         } catch (_: NotYetAvailableException) {

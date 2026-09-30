@@ -51,11 +51,23 @@ class CoverageCoachTest {
     }
 
     @Test
-    fun lookingAwayDoesNotAwardCoverage() {
+    fun lookingAwayDoesNotAwardCoverageOrPassFusionGate() {
         val coach = CoverageCoach()
+        val camera = Vector3(0f, 0f, 1f)
+        val away = Vector3(0f, 0f, 1f)
+        assertFalse(
+            coach.shouldFuse(
+                camera = camera,
+                cameraForward = away,
+                target = target,
+                nowNanos = 1_000_000_000L,
+                trackingGood = true,
+            ),
+        )
+
         val state = coach.update(
-            camera = Vector3(0f, 0f, 1f),
-            cameraForward = Vector3(0f, 0f, 1f),
+            camera = camera,
+            cameraForward = away,
             target = target,
             nowNanos = 1_000_000_000L,
             depthConfidence = 0.9f,
@@ -88,7 +100,7 @@ class CoverageCoachTest {
     }
 
     @Test
-    fun fastMovementDoesNotAwardAnotherSector() {
+    fun fastMovementDoesNotPassFusionGateOrAwardAnotherSector() {
         val coach = CoverageCoach()
         val firstCamera = Vector3(0f, 0f, 1f)
         val first = coach.update(
@@ -103,9 +115,21 @@ class CoverageCoachTest {
         assertEquals(11, first.coveragePercent)
 
         val secondCamera = Vector3(1f, 0f, 0f)
+        val secondForward = (target - secondCamera).normalized()
+        assertFalse(
+            coach.shouldFuse(
+                camera = secondCamera,
+                cameraForward = secondForward,
+                target = target,
+                nowNanos = 1_100_000_000L,
+                trackingGood = true,
+            ),
+        )
+
+        // shouldFuse is deliberately non-mutating: update must still see the same fast motion.
         val second = coach.update(
             camera = secondCamera,
-            cameraForward = (target - secondCamera).normalized(),
+            cameraForward = secondForward,
             target = target,
             nowNanos = 1_100_000_000L,
             depthConfidence = 0.9f,

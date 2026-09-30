@@ -40,6 +40,15 @@ data class CoverageState(
 }
 
 class CoverageCoach {
+    private data class PoseMetrics(
+        val distance: Float,
+        val speed: Float,
+        val angularSpeed: Float,
+        val aimError: Float,
+        val elevation: Float,
+        val offset: Vector3,
+    )
+
     private var lastCamera: Vector3? = null
     private var lastForward: Vector3? = null
     private var lastTimeNanos: Long = 0L
@@ -52,6 +61,21 @@ class CoverageCoach {
         lastTimeNanos = 0L
     }
 
+    /**
+     * Fast pose-only gate used before TSDF fusion. It intentionally does not mutate motion
+     * history; [update] commits the pose only after a fresh raw-depth frame has been evaluated.
+     */
+    fun shouldFuse(
+        camera: Vector3,
+        cameraForward: Vector3,
+        target: Vector3,
+        nowNanos: Long,
+        trackingGood: Boolean,
+    ): Boolean = poseUsable(
+        measurePose(camera, cameraForward, target, nowNanos),
+        trackingGood,
+    )
+
     fun update(
         camera: Vector3,
         cameraForward: Vector3,
@@ -61,6 +85,52 @@ class CoverageCoach {
         depthPointCount: Int,
         trackingGood: Boolean,
     ): CoverageState {
+        val forward = cameraForward.normalized()
+        val metrics = measurePose(camera, forward, target, nowNanos)
+        val frameUsable = poseUsable(metrics, trackingGood) &&
+            depthPointCount >= MIN_DEPTH_POINTS &&
+            depthConfidence >= MIN_COVERAGE_CONFIDENCE
+
+        if (frameUsable) {
+            if (metrics.elevation > 32f) {
+                bins[8] = true
+            } else {
+                var angle = atan2(metrics.offset.x, metrics.offset.z) * 180f / PI.toFloat()
+                if (angle < 0f) angle += 360f
+                val bin = ((angle + 22.5f) / 45f).toInt() % 8
+                bins[bin] = true
+            }
+        }
+
+        lastCamera = camera
+        lastForward = forward
+        lastTimeNanos = nowNanos
+        return CoverageState(
+            covered = bins.copyOf(),
+            distanceMeters = metrics.distance,
+            speedMetersPerSecond = metrics.speed,
+            angularSpeedDegreesPerSecond = metrics.angularSpeed,
+            depthConfidence = depthConfidence,
+            depthPointCount = depthPointCount,
+            aimErrorDegrees = metrics.aimError,
+            trackingGood = trackingGood,
+            frameUsable = frameUsable,
+        )
+    }
+
+    fun reset() {
+        bins.fill(false)
+        lastCamera = null
+        lastForward = null
+        lastTimeNanos = 0L
+    }
+
+    private fun measurePose(
+        camera: Vector3,
+        cameraForward: Vector3,
+        target: Vector3,
+        nowNanos: Long,
+    ): PoseMetrics {
         val offset = camera - target
         val distance = offset.length()
         val horizontal = sqrt(offset.x * offset.x + offset.z * offset.z)
@@ -83,47 +153,15 @@ class CoverageCoach {
             angleDegrees(previousForward, forward) / dt
         }
 
-        val frameUsable = trackingGood &&
-            distance in 0.35f..3.0f &&
-            speed <= MAX_TRANSLATIONAL_SPEED_MPS &&
-            angularSpeed <= MAX_ANGULAR_SPEED_DPS &&
-            aimError <= MAX_AIM_ERROR_DEGREES &&
-            depthPointCount >= MIN_DEPTH_POINTS &&
-            depthConfidence >= MIN_COVERAGE_CONFIDENCE
-
-        if (frameUsable) {
-            if (elevation > 32f) {
-                bins[8] = true
-            } else {
-                var angle = atan2(offset.x, offset.z) * 180f / PI.toFloat()
-                if (angle < 0f) angle += 360f
-                val bin = ((angle + 22.5f) / 45f).toInt() % 8
-                bins[bin] = true
-            }
-        }
-
-        lastCamera = camera
-        lastForward = forward
-        lastTimeNanos = nowNanos
-        return CoverageState(
-            covered = bins.copyOf(),
-            distanceMeters = distance,
-            speedMetersPerSecond = speed,
-            angularSpeedDegreesPerSecond = angularSpeed,
-            depthConfidence = depthConfidence,
-            depthPointCount = depthPointCount,
-            aimErrorDegrees = aimError,
-            trackingGood = trackingGood,
-            frameUsable = frameUsable,
-        )
+        return PoseMetrics(distance, speed, angularSpeed, aimError, elevation, offset)
     }
 
-    fun reset() {
-        bins.fill(false)
-        lastCamera = null
-        lastForward = null
-        lastTimeNanos = 0L
-    }
+    private fun poseUsable(metrics: PoseMetrics, trackingGood: Boolean): Boolean =
+        trackingGood &&
+            metrics.distance in 0.35f..3.0f &&
+            metrics.speed <= MAX_TRANSLATIONAL_SPEED_MPS &&
+            metrics.angularSpeed <= MAX_ANGULAR_SPEED_DPS &&
+            metrics.aimError <= MAX_AIM_ERROR_DEGREES
 
     private fun angleDegrees(a: Vector3, b: Vector3): Float {
         val dot = (a.x * b.x + a.y * b.y + a.z * b.z).coerceIn(-1f, 1f)

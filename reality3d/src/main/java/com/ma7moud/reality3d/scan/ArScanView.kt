@@ -158,12 +158,34 @@ class ArScanView(
         frameCounter++
         if (frameCounter % 6 != 0 || finishing) return
 
+        val pose = camera.pose
+        val cameraPos = Vector3(pose.tx(), pose.ty(), pose.tz())
+        // ARCore physical camera convention is OpenGL-like: local -Z points where the camera
+        // looks. Transform a point one meter down -Z and subtract the camera translation to get
+        // the world-space forward vector without depending on an extra Pose helper API.
+        val forwardPoint = pose.transformPoint(floatArrayOf(0f, 0f, -1f))
+        val cameraForward = Vector3(
+            forwardPoint[0] - cameraPos.x,
+            forwardPoint[1] - cameraPos.y,
+            forwardPoint[2] - cameraPos.z,
+        ).normalized()
+
+        val targetBeforeIntegration = target
+        val poseAllowsFusion = targetBeforeIntegration == null || coach.shouldFuse(
+            camera = cameraPos,
+            cameraForward = cameraForward,
+            target = targetBeforeIntegration,
+            nowNanos = frame.timestamp,
+            trackingGood = true,
+        )
+
         val previousDepthTimestamp = lastDepthTimestamp
         val integrated = RawDepthIntegrator.integrate(
             frame = frame,
             volume = volume,
-            existingTarget = target,
+            existingTarget = targetBeforeIntegration,
             lastDepthTimestamp = previousDepthTimestamp,
+            fuseIntoVolume = poseAllowsFusion,
         )
         lastDepthTimestamp = integrated.depthTimestamp
         target = integrated.target
@@ -175,18 +197,6 @@ class ArScanView(
             integrated.depthTimestamp != previousDepthTimestamp
         if (!hasFreshDepth) return
 
-        val pose = camera.pose
-        val cameraPos = Vector3(pose.tx(), pose.ty(), pose.tz())
-        // ARCore physical camera convention is OpenGL-like: local -Z points where the camera
-        // looks. Transform a point one meter down -Z and subtract the camera translation to get
-        // a stable world-space forward vector without depending on an extra Pose helper API.
-        val forwardPoint = pose.transformPoint(floatArrayOf(0f, 0f, -1f))
-        val cameraForward = Vector3(
-            forwardPoint[0] - cameraPos.x,
-            forwardPoint[1] - cameraPos.y,
-            forwardPoint[2] - cameraPos.z,
-        ).normalized()
-
         val t = target
         if (t != null) {
             coverageState = coach.update(
@@ -195,7 +205,7 @@ class ArScanView(
                 target = t,
                 nowNanos = frame.timestamp,
                 depthConfidence = integrated.meanConfidence,
-                depthPointCount = integrated.integratedPoints,
+                depthPointCount = integrated.usablePoints,
                 trackingGood = true,
             )
             activity.runOnUiThread { callbacks.onCoverage(coverageState) }
