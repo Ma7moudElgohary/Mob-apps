@@ -12,6 +12,12 @@ import kotlin.math.abs
  */
 internal object SurfaceCompleteness {
 
+    /** Enough real surface for an early local preview without relying almost entirely on inferred fill. */
+    const val MIN_BUILD = 0.25f
+
+    /** Measured-surface level required before directional coverage can call a scan "enough". */
+    const val GOOD = 0.45f
+
     private const val MEASURED_FIELD_LIMIT = 0.95f
     private const val MIN_SURFACE_CROSSINGS = 24
 
