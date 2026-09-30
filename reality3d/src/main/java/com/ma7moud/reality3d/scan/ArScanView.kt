@@ -31,6 +31,7 @@ class ArScanView(
     private var surfaceWidth = 1
     private var surfaceHeight = 1
     private var frameCounter = 0
+    private var lastDepthTimestamp: Long? = null
     private var finishing = false
     private val coach = CoverageCoach()
     private var volume = SparseTsdfVolume()
@@ -62,11 +63,11 @@ class ArScanView(
                 }
                 val created = Session(activity)
                 val config = Config(created)
-                if (!created.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
+                if (!created.isDepthModeSupported(Config.DepthMode.RAW_DEPTH_ONLY)) {
                     created.close()
-                    throw IllegalStateException("ARCore Depth API is not supported on this device.")
+                    throw IllegalStateException("ARCore Raw Depth API is not supported on this device.")
                 }
-                config.depthMode = Config.DepthMode.AUTOMATIC
+                config.depthMode = Config.DepthMode.RAW_DEPTH_ONLY
                 config.focusMode = Config.FocusMode.AUTO
                 created.configure(config)
                 val rotation = currentRotation()
@@ -152,14 +153,31 @@ class ArScanView(
         }
         frameCounter++
         if (frameCounter % 6 != 0 || finishing) return
-        val integrated = RawDepthIntegrator.integrate(frame, volume, target)
+
+        val integrated = RawDepthIntegrator.integrate(
+            frame = frame,
+            volume = volume,
+            existingTarget = target,
+            lastDepthTimestamp = lastDepthTimestamp,
+        )
+        lastDepthTimestamp = integrated.depthTimestamp
         target = integrated.target
+
         val pose = camera.pose
         val cameraPos = Vector3(pose.tx(), pose.ty(), pose.tz())
         val t = target
         if (t != null) {
-            coverageState = coach.update(cameraPos, t, frame.timestamp, integrated.meanConfidence, true)
-            activity.runOnUiThread { callbacks.onCoverage(coverageState) }
+            // Coverage should advance only when this frame contributed fresh depth samples.
+            if (integrated.integratedPoints > 0) {
+                coverageState = coach.update(
+                    cameraPos,
+                    t,
+                    frame.timestamp,
+                    integrated.meanConfidence,
+                    true,
+                )
+                activity.runOnUiThread { callbacks.onCoverage(coverageState) }
+            }
         } else {
             activity.runOnUiThread {
                 callbacks.onStatus("Point the center reticle at the object and move slightly sideways to initialize depth.")
