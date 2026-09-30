@@ -13,6 +13,7 @@ internal data class IntegrationResult(
     val target: Vector3?,
     val meanConfidence: Float,
     val integratedPoints: Int,
+    val depthTimestamp: Long?,
 )
 
 internal object RawDepthIntegrator {
@@ -27,11 +28,12 @@ internal object RawDepthIntegrator {
         frame: Frame,
         volume: SparseTsdfVolume,
         existingTarget: Vector3?,
+        lastDepthTimestamp: Long? = null,
         maxRadiusMeters: Float = 1.35f,
     ): IntegrationResult {
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
-            return IntegrationResult(existingTarget, 0f, 0)
+            return IntegrationResult(existingTarget, 0f, 0, lastDepthTimestamp)
         }
 
         val pose = camera.pose
@@ -42,6 +44,13 @@ internal object RawDepthIntegrator {
 
         try {
             depthImage = frame.acquireRawDepthImage16Bits()
+            val currentDepthTimestamp = depthImage.timestamp
+            if (lastDepthTimestamp != null && currentDepthTimestamp == lastDepthTimestamp) {
+                // ARCore reprojects the latest raw-depth estimate between actual depth updates.
+                // Re-integrating the same estimate would waste work and overweight stale samples.
+                return IntegrationResult(existingTarget, 0f, 0, currentDepthTimestamp)
+            }
+
             confidenceImage = frame.acquireRawDepthConfidenceImage()
             cameraImage = runCatching { frame.acquireCameraImage() }.getOrNull()
 
@@ -65,7 +74,7 @@ internal object RawDepthIntegrator {
             val cx = principal[0] * scaleX
             val cy = principal[1] * scaleY
 
-            var target = existingTarget ?: findTarget(
+            val target = existingTarget ?: findTarget(
                 depthImage,
                 confidenceImage,
                 fx,
@@ -144,12 +153,13 @@ internal object RawDepthIntegrator {
                 target = target,
                 meanConfidence = if (confidenceCount == 0) 0f else confidenceSum / confidenceCount,
                 integratedPoints = integrated,
+                depthTimestamp = currentDepthTimestamp,
             )
         } catch (_: NotYetAvailableException) {
-            // Normal while ARCore is warming up or no new raw-depth estimate is available yet.
-            return IntegrationResult(existingTarget, 0f, 0)
+            // Normal while ARCore is warming up or no raw-depth estimate is available yet.
+            return IntegrationResult(existingTarget, 0f, 0, lastDepthTimestamp)
         } catch (_: Throwable) {
-            return IntegrationResult(existingTarget, 0f, 0)
+            return IntegrationResult(existingTarget, 0f, 0, lastDepthTimestamp)
         } finally {
             cameraImage?.close()
             confidenceImage?.close()
