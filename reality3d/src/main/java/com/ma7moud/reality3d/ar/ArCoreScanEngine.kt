@@ -42,6 +42,7 @@ import com.ma7moud.reality3d.scan.ScanCapture
 import com.ma7moud.reality3d.scan.ScanCoach
 import com.ma7moud.reality3d.scan.ScanEngine
 import com.ma7moud.reality3d.scan.ScanEngineFactory
+import com.ma7moud.reality3d.scan.ScanFramePolicy
 import com.ma7moud.reality3d.scan.ScanPhase
 import com.ma7moud.reality3d.scan.ScanQuality
 import com.ma7moud.reality3d.scan.ScanReconstructor
@@ -148,10 +149,11 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private var qualitySum = 0.0
     private var qualityCount = 0
 
-    // For the scan report: which kind of depth came in, and how much was lost to the anchor.
+    // For the scan report: which kind of depth came in, and why some candidate frames were rejected.
     private val rawDepthMaps = AtomicInteger()
     private val smoothedDepthMaps = AtomicInteger()
     private val framesSkippedForAnchor = AtomicInteger()
+    private val framesSkippedForQuality = AtomicInteger()
     @Volatile private var depthSize: String? = null
     @Volatile private var cameraSize: String? = null
     @Volatile private var cameraChoices: String? = null
@@ -166,7 +168,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
     private var previousPosition: FloatArray? = null
     private var previousFrameAt = 0L
 
-    /** The phone turns and moves slowly enough for sharp photos. */
+    /** The phone turns and moves slowly enough for sharp photos and trustworthy depth alignment. */
     private var steady = false
     private var lastRawDepthAt = 0L
     private var boxAnchor: ArAnchor? = null
@@ -202,8 +204,10 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             append("ARCore camera ${cameraSize ?: "?"}")
             cameraChoices?.let { append(" (this phone offers $it)") }
             append(", depth map ${depthSize ?: "none yet"}")
-            append(" · depth maps used: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
+            append(" · depth maps acquired: ${rawDepthMaps.get()} raw (with confidence), ${smoothedDepthMaps.get()} smoothed")
+            append(" · depth maps fused: ${depthFrames.get()}")
             append(" · frames skipped while the box anchor was lost: ${framesSkippedForAnchor.get()}")
+            append(" · frames skipped for aim/motion/distance/depth quality: ${framesSkippedForQuality.get()}")
             append(" · surface found: ${surfaceFoundAfterMs?.let { "after ${it / 1000} s" } ?: "no"}")
             arCoreVersion()?.let { append(" · Google Play Services for AR $it") }
         }
@@ -234,6 +238,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             selector.reset()
             keyframes.clear()
             depthFrames.set(0)
+            framesSkippedForQuality.set(0)
             qualitySum = 0.0
             qualityCount = 0
             volume = TsdfVolume(current)
@@ -258,6 +263,7 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             selector.reset()
             keyframes.clear()
             depthFrames.set(0)
+            framesSkippedForQuality.set(0)
             qualitySum = 0.0
             qualityCount = 0
             phase = if (box != null) ScanPhase.READY else ScanPhase.PLACE_BOX
@@ -487,7 +493,13 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             return
         }
 
-        if (now - lastDepthAt >= DEPTH_INTERVAL_MS && fusing.compareAndSet(false, true)) {
+        val captureUsable = ScanFramePolicy.captureUsable(scanBox.size, distance, inView, steady)
+        val depthDue = now - lastDepthAt >= DEPTH_INTERVAL_MS
+        if (depthDue && !captureUsable) {
+            // Throttle rejected samples to the normal depth cadence instead of counting every render frame.
+            lastDepthAt = now
+            framesSkippedForQuality.incrementAndGet()
+        } else if (depthDue && fusing.compareAndSet(false, true)) {
             val depth = acquireDepth(frame, camera, pose)
             if (depth == null) {
                 fusing.set(false)
@@ -495,15 +507,19 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
                 lastDepthAt = now
                 fusion.execute {
                     try {
-                        DepthQuality.measure(depth, scanBox)?.let { quality ->
-                            depthQuality = quality
-                            synchronized(scanLock) {
-                                qualitySum += quality
-                                qualityCount++
+                        val quality = DepthQuality.measure(depth, scanBox)
+                        if (scanVolume.integrate(depth, pool, FUSION_THREADS)) {
+                            depthFrames.incrementAndGet()
+                            quality?.let {
+                                depthQuality = it
+                                synchronized(scanLock) {
+                                    qualitySum += it
+                                    qualityCount++
+                                }
                             }
+                        } else {
+                            framesSkippedForQuality.incrementAndGet()
                         }
-                        scanVolume.integrate(depth, pool, FUSION_THREADS)
-                        depthFrames.incrementAndGet()
                     } catch (e: Exception) {
                         Log.w(TAG, "Depth fusion failed", e)
                     } finally {
@@ -513,8 +529,8 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
             }
         }
 
-        if (!encoding.get() && keyframes.size < MAX_PHOTOS && distance in MIN_DISTANCE..MAX_DISTANCE && steady &&
-            inView && synchronized(scanLock) { selector.isNew(toCamera) }
+        if (!encoding.get() && keyframes.size < MAX_PHOTOS && captureUsable &&
+            synchronized(scanLock) { selector.isNew(toCamera) }
         ) {
             val image = try {
                 frame.acquireCameraImage()
@@ -815,8 +831,6 @@ class ArCoreScanEngine(private val context: Context) : ScanEngine {
         const val PUBLISH_INTERVAL_MS = 150L
         const val MAX_PHOTOS = 150
         const val JPEG_QUALITY = 90
-        const val MIN_DISTANCE = 0.12f
-        const val MAX_DISTANCE = 3f
         const val MAX_TURN_DEG_PER_S = 45f
         const val MAX_SPEED_M_PER_S = 0.35f
         const val EDGE_DOTS = 12
