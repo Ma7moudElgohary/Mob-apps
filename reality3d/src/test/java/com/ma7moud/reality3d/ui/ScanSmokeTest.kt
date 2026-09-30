@@ -79,12 +79,13 @@ internal class FakeScanEngine : ScanEngine {
     }
 
     override fun startScanning() {
-        // The first lap done and a little of the second.
+        // The first lap done and a little of the second, with enough measured geometry for a local preview.
         val coverage = BooleanArray(CoverageTracker.CELLS) { it < 15 }
         _status.value = ScanStatus(
             phase = ScanPhase.SCANNING,
             coverage = coverage,
             coverageFraction = 0.6f,
+            surfaceCompleteness = 0.6f,
             nextStep = CoverageTracker.Step.MIDDLE_RING,
             phoneAzimuth = 40f,
             phoneRing = 1,
@@ -120,7 +121,7 @@ internal class FakeScanEngine : ScanEngine {
         val mesh = ScanReconstructor.reconstruct(SyntheticScan.fuse(poses, resolution = 48), poses.take(6).map { SyntheticScan.photo(it) })
         val keyframes = poses.take(6).map { Keyframe(ByteArray(64) { i -> i.toByte() }, 320, 240, SyntheticScan.colorIntrinsics, it) }
         val coverage = _status.value.coverage
-        ScanCapture(mesh, keyframes, ScanQuality.assess(coverage, keyframes.size, 73, 0.7f))
+        ScanCapture(mesh, keyframes, ScanQuality.assess(coverage, keyframes.size, 73, 0.7f, 0.6f))
     }
 
     override suspend fun photoSet(): PhotoSet {
@@ -174,6 +175,7 @@ class ScanSmokeTest {
         compose.onNodeWithText("Start scan").performClick()
 
         waitForText("Covered 60%")
+        compose.onNodeWithText("Measured shape 60%").assertIsDisplayed()
         compose.onNodeWithText("24 photos · 73 depth maps").assertIsDisplayed()
         // The first lap is done and the second has begun; the instruction follows a moment later, once it has held.
         compose.onNodeWithText("Lap 2 of 2 · 3 of 12 sides").assertIsDisplayed()
@@ -183,7 +185,7 @@ class ScanSmokeTest {
         compose.runOnUiThread {
             engine.emit(
                 ScanStatus(
-                    phase = ScanPhase.SCANNING, coverageFraction = 0.6f, photos = 24, depthFrames = 73,
+                    phase = ScanPhase.SCANNING, coverageFraction = 0.6f, surfaceCompleteness = 0.6f, photos = 24, depthFrames = 73,
                     coach = CoachTip("Too fast. Move the phone slowly.", CoachTip.Kind.WARNING),
                 ),
             )
@@ -298,10 +300,19 @@ class ScanSmokeTest {
         compose.onNodeWithText("Start scan").performClick()
         waitForText("Covered 60%")
 
-        // Nine of twelve sides of both main laps: enough, whatever the top and the high lap look like.
+        // Nine of twelve sides of both main laps plus measured geometry: enough, whatever the top and high lap look like.
         val twoLaps = BooleanArray(CoverageTracker.CELLS) { it % CoverageTracker.SEGMENTS < 9 && it < 2 * CoverageTracker.SEGMENTS }
         compose.runOnUiThread {
-            engine.emit(ScanStatus(phase = ScanPhase.SCANNING, coverage = twoLaps, coverageFraction = 0.49f, photos = 30, depthFrames = 50))
+            engine.emit(
+                ScanStatus(
+                    phase = ScanPhase.SCANNING,
+                    coverage = twoLaps,
+                    coverageFraction = 0.49f,
+                    surfaceCompleteness = 0.6f,
+                    photos = 30,
+                    depthFrames = 50,
+                ),
+            )
         }
         waitForText("Enough to build")
         compose.onNodeWithText("Build model").assertIsEnabled()
