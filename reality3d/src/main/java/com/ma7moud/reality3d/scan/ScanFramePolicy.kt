@@ -1,10 +1,11 @@
 package com.ma7moud.reality3d.scan
 
 /**
- * One capture policy shared by live AR scanning and the defensive TSDF boundary.
+ * Live capture policy for AR scanning.
  *
  * The coach already tells the user when these conditions are bad; this policy makes those same conditions
- * actionable so warned frames do not become reconstruction input or coverage photos.
+ * actionable so warned frames do not become reconstruction input or coverage photos. The TSDF also keeps
+ * its own defensive geometry/depth checks as a second line of protection.
  */
 internal object ScanFramePolicy {
 
