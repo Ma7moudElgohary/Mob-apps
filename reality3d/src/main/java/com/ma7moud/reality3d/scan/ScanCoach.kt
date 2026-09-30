@@ -22,7 +22,7 @@ class CoachInput(
     /** Phone speed in m/s and turn rate in degrees per second. */
     val speed: Float,
     val turnRate: Float,
-    /** Share of the object's area with confident depth (0..1), or null before any depth arrived. */
+    /** Share of the object's projected area with confident, 3D-consistent depth (0..1). */
     val depthQuality: Float?,
     val coverage: BooleanArray,
     val phoneAzimuth: Float?,
@@ -166,15 +166,16 @@ object ScanQuality {
     private const val UNKNOWN_DEPTH_QUALITY = 0.6f
 }
 
-/** How much of the box, as the depth camera sees it, has depth ARCore is confident about. */
+/** How much of the selected scan volume has reliable ARCore depth in the current view. */
 internal object DepthQuality {
 
     /** Confidence (0..255) from which a depth pixel counts as reliable. */
     private const val CONFIDENT = 128
 
     /**
-     * The share of pixels inside the box's outline on the depth image that have confident depth; null when
-     * the frame has no confidence map or the box is out of view.
+     * Share of pixels inside the projected box that have confident depth and back-project to the selected
+     * 3D scan volume. Background walls and foreground occluders therefore do not inflate the quality score.
+     * Returns null when the frame has no confidence map or the box is out of view.
      */
     fun measure(frame: DepthFrame, box: ScanBox): Float? {
         val confidence = frame.confidence ?: return null
@@ -202,7 +203,13 @@ internal object DepthQuality {
         for (y in y0 until y1) {
             for (x in x0 until x1) {
                 val i = y * frame.width + x
-                if (frame.depthMm[i].toInt() != 0 && (confidence[i].toInt() and 0xFF) >= CONFIDENT) good++
+                val depthMm = frame.depthMm[i].toInt() and 0xFFFF
+                if (depthMm != 0 &&
+                    (confidence[i].toInt() and 0xFF) >= CONFIDENT &&
+                    FusionFrameGate.depthPointNearBox(frame, x, y, depthMm, box)
+                ) {
+                    good++
+                }
             }
         }
         return good.toFloat() / ((x1 - x0) * (y1 - y0))
