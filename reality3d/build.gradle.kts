@@ -17,7 +17,12 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNumber
-        versionName = "0.2.$buildNumber"
+        versionName = "0.5.$buildNumber"
+
+        // Phones that run Gemini Nano are all 64-bit ARM; dropping the other ABIs of LiteRT saves several MB.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -44,6 +49,14 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+        // Robolectric smoke tests render the real screen on the JVM.
+        unitTests.isIncludeAndroidResources = true
+        // Every screen is rendered on the JVM in one process: give it room.
+        unitTests.all { it.maxHeapSize = "1536m" }
+    }
 }
 
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
@@ -52,13 +65,23 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
-    implementation("com.google.mlkit:genai-prompt:1.0.0-beta4")
-    implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
-    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+    implementation(libs.mlkit.genai.prompt)
+    implementation(libs.mlkit.subject.segmentation)
+    implementation(libs.litert)
+    implementation(libs.arcore)
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

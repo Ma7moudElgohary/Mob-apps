@@ -1,40 +1,37 @@
 package com.ma7moud.reality3d.depth
 
 import android.content.Context
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.ma7moud.reality3d.data.ModelDownload
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 
-class DepthModelManager(private val context: Context) {
-    val modelFile: File = File(context.filesDir, MODEL_FILE_NAME)
-    fun isReady(): Boolean = modelFile.exists() && modelFile.length() > 20_000_000
+/** Downloads the Depth Anything V2 model once (resumable, checked with SHA-256, in no-backup storage). */
+class DepthModelManager(context: Context) {
 
-    suspend fun download(): File = withContext(Dispatchers.IO) {
-        if (isReady()) return@withContext modelFile
-        val temp = File(context.filesDir, "$MODEL_FILE_NAME.part")
-        if (temp.exists()) temp.delete()
-        val connection = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 20_000
-            readTimeout = 120_000
-            instanceFollowRedirects = true
-        }
-        try {
-            connection.connect()
-            if (connection.responseCode !in 200..299) error("Model download failed: HTTP ${connection.responseCode}")
-            connection.inputStream.use { input -> temp.outputStream().buffered().use { output -> input.copyTo(output) } }
-            if (temp.length() < 20_000_000) error("Downloaded depth model is unexpectedly small")
-            if (modelFile.exists()) modelFile.delete()
-            check(temp.renameTo(modelFile)) { "Unable to finalize depth model" }
-            modelFile
-        } finally {
-            connection.disconnect()
+    private val directory: File = context.noBackupFilesDir
+    private val model = ModelDownload(directory, MODEL_FILE_NAME, MODEL_URL, MODEL_BYTES, MODEL_SHA256, "depth model")
+    val modelFile: File = model.file
+
+    init {
+        // Earlier versions used MiDaS (34 MB), kept at first in filesDir and later in no-backup storage.
+        for (dir in listOf(context.filesDir, directory)) {
+            File(dir, LEGACY_FILE_NAME).delete()
+            File(dir, "$LEGACY_FILE_NAME.part").delete()
         }
     }
 
+    fun isReady(): Boolean = model.isReady()
+
+    suspend fun download(onProgress: (Float) -> Unit): File = model.download(onProgress)
+
     companion object {
-        private const val MODEL_FILE_NAME = "midas_small_256_fp16.tflite"
-        private const val MODEL_URL = "https://huggingface.co/litert-community/MiDaS-small/resolve/main/midas_small_256_fp16.tflite?download=true"
+        const val MODEL_BYTES = 27_733_680L
+        const val MODEL_SHA256 = "f74509422e4a9270a354b249a9193abdd4903354be63701262238a7f4b869611"
+        private const val MODEL_FILE_NAME = "depth_anything_v2_small_wi8_afp32.tflite"
+        private const val LEGACY_FILE_NAME = "midas_small_256_fp16.tflite"
+
+        // Depth Anything V2 Small (Apache-2.0) with int8 weights, pinned to one revision of
+        // litert-community/depth-anything-v2-small so the checksum always matches.
+        private const val MODEL_URL = "https://huggingface.co/litert-community/depth-anything-v2-small/resolve/" +
+            "178427e448dbf4da93b1e7b1b2abc103ad329bd6/tflite/depth_anything_v2_small_wi8_afp32.tflite"
     }
 }

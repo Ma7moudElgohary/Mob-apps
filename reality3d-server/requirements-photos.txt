@@ -1,0 +1,2 @@
+# The photo builder (3D from many photos). Optional: the server works without it.
+pycolmap>=4.0
